@@ -89,8 +89,8 @@ fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
       color += light_color(light) * intensity;
     }
   }
-  color += fragData.luminance;
-  color += lights.ambient_luminance;
+  let ambient = lights.ambient_luminance + fragData.luminance;
+  color += ambient;
 
   
   let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));
@@ -100,7 +100,7 @@ fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
   let frag_depth = shadow_pos.z / shadow_pos.w;
   let diff = frag_depth - shadow_depth;
   if(diff > 0.001){
-    return vec4f(0,0,0,1);
+    return vec4f(ambient * fragData.color,1);
   }
 
   return vec4f(color * fragData.color, 1);

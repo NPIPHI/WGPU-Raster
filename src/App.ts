@@ -42,11 +42,11 @@ export class App {
 
     constructor(private device: GPUDevice, private context: GPUCanvasContext, private res_x: number, private res_y: number){   
         this.scene = new Scene();
-        this.shadow_res_x = 512;
-        this.shadow_res_y = 512;
+        this.shadow_res_x = 2048;
+        this.shadow_res_y = 2048;
         this.camera = this.make_camera();
         this.raster = this.setup_raster();
-        this.set_shadow(this.scene.shadow_perspectives());
+        this.update_lights();
     }
 
     private make_camera(): Camera {
@@ -70,12 +70,27 @@ export class App {
         this.device.queue.writeBuffer(this.raster.shadow_view, 0, new Float32Array(mat));
     }
 
+    update_lights(){
+        this.set_shadow(this.scene.shadow_perspectives());
+        const lights = this.scene.encode_lights();
+        const needed_size = lights.byteLength + VEC_ALIGN;
+        if(this.raster.point_light_buffer.size < needed_size){
+            this.raster.point_light_buffer.destroy();
+            this.raster.point_light_buffer = this.device.createBuffer({
+                size: needed_size,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+            })
+        }
+        this.device.queue.writeBuffer(this.raster.point_light_buffer, 0, new Uint32Array([this.scene.light_count()]));
+        this.device.queue.writeBuffer(this.raster.point_light_buffer, U32_SIZE, new Float32Array([this.scene.ambient_luminance()]));
+        this.device.queue.writeBuffer(this.raster.point_light_buffer, VEC_ALIGN, lights, 0, lights.length);
+    }
+
     private setup_raster(): RasterData {
         const forward_shader = this.device.createShaderModule({code: color_shader_src(this.res_x, this.res_y), label: "color shader"})
         const shadow_shader = this.device.createShaderModule({code: shadow_shader_src(this.res_x, this.res_y), label: "shadow shader"})
         
         const {vertices, indices} = this.scene.encode_ground_vertices();
-        const lights = this.scene.encode_lights();
 
         let depth_buffer = this.device.createTexture({
             size: [this.context.canvas.width, this.context.canvas.height],
@@ -110,7 +125,7 @@ export class App {
         })
 
         const light_buffer = this.device.createBuffer({
-            size: lights.byteLength + U32_SIZE + 16,
+            size: 64, //starting size
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         })
 
@@ -120,9 +135,6 @@ export class App {
         })
     
         this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
-        this.device.queue.writeBuffer(light_buffer, 0, new Uint32Array([this.scene.light_count()]));
-        this.device.queue.writeBuffer(light_buffer, U32_SIZE, new Float32Array([this.scene.ambient_luminance()]));
-        this.device.queue.writeBuffer(light_buffer, VEC_ALIGN, lights, 0, lights.length);
         this.device.queue.writeBuffer(index_buffer, 0, indices);
           
         const shadow_vertex_buffers: GPUVertexBufferLayout[] = [
@@ -288,6 +300,7 @@ export class App {
             },
             primitive: {
                 topology: "triangle-list",
+                cullMode: "back",
             },
             depthStencil: {
                 format: "depth32float",
@@ -314,6 +327,7 @@ export class App {
             },
             primitive: {
                 topology: "triangle-list",
+                cullMode: "none"
             },
             depthStencil: {
                 format: "depth32float",

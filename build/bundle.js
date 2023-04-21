@@ -1899,7 +1899,7 @@
     }
     shadow_view() {
       const perspective2 = mat4_exports.create();
-      mat4_exports.perspective(perspective2, Math.PI / 2, 1, 0.1, 100);
+      mat4_exports.perspective(perspective2, Math.PI / 2, 1, 1, 200);
       const look_at = vec3_exports.create();
       vec3_exports.add(look_at, this.pos, this.dir);
       const view = mat4_exports.create();
@@ -1909,38 +1909,91 @@
       return mvp_shadow;
     }
   };
+  var NoiseOctave = class {
+    constructor(f, s_x, s_y, s_z) {
+      this.f = f;
+      this.s_x = s_x;
+      this.s_y = s_y;
+      this.s_z = s_z;
+    }
+    at(x, y) {
+      return (this.f(x * this.s_x, y * this.s_y) + 1) * this.s_z;
+    }
+  };
   var Ground = class {
     dim_x;
     dim_y;
     res_x;
     res_y;
-    noise_octaves;
+    major_octave;
+    minor_octave;
+    texture_octave;
     constructor() {
-      this.dim_x = 200;
-      this.dim_y = 200;
+      this.dim_x = 1e3;
+      this.dim_y = 1e3;
       this.res_x = 0.1;
       this.res_y = 0.1;
-      this.noise_octaves = [
-        { f: createNoise2D((0, import_alea.default)(1)), s_x: 0.01, s_y: 0.01, s_z: 4 },
-        { f: createNoise2D((0, import_alea.default)(2)), s_x: 0.1, s_y: 0.1, s_z: 5 },
-        { f: createNoise2D((0, import_alea.default)(3)), s_x: 1, s_y: 1, s_z: 0.02 }
-      ];
+      this.major_octave = new NoiseOctave(createNoise2D((0, import_alea.default)(10)), 0.01, 0.01, 5);
+      this.minor_octave = new NoiseOctave(createNoise2D((0, import_alea.default)(20)), 0.1, 0.1, 2);
+      this.texture_octave = new NoiseOctave(createNoise2D((0, import_alea.default)(30)), 1, 1, 0.02);
     }
     encode_vertices() {
       let vertices = [];
-      for (let xi = 0; xi < this.dim_x; xi++) {
-        for (let yi = 0; yi < this.dim_y; yi++) {
+      for (let yi = 0; yi < this.dim_y; yi++) {
+        for (let xi = 0; xi < this.dim_x; xi++) {
           const x = xi * this.res_x;
           const y = yi * this.res_y;
           const h = this.height(x, y);
           const { dx, dy } = this.dheight(x, y);
           const n = vec3_exports.fromValues(dx, dy, 1);
           vec3_exports.normalize(n, n);
-          const color = [1, 1, 1, 0];
+          let color = [1, 1, 1, 0];
+          if (h == 3) {
+            color = [38 / 255, 113 / 255, 170 / 255, 0];
+          } else {
+            color = [0.2, 0.5, 0.2, 0];
+          }
           vertices.push(x, y, h, ...n, ...color);
         }
       }
+      for (let xi = 0; xi < this.dim_x; xi++) {
+        const x = xi * this.res_x;
+        const y = 0;
+        const h = -2;
+        const n = [0, 1, 0];
+        let color = [0, 0, 0, 0];
+        vertices.push(x, y, h, ...n, ...color);
+      }
+      for (let xi = 0; xi < this.dim_x; xi++) {
+        const x = xi * this.res_x;
+        const y = (this.dim_y - 1) * this.res_y;
+        const h = -2;
+        const n = [0, 1, 0];
+        let color = [0, 0, 0, 0];
+        vertices.push(x, y, h, ...n, ...color);
+      }
+      for (let yi = 0; yi < this.dim_y; yi++) {
+        const x = 0;
+        const y = yi * this.res_y;
+        const h = -2;
+        const n = [0, 1, 0];
+        let color = [0, 0, 0, 0];
+        vertices.push(x, y, h, ...n, ...color);
+      }
+      for (let yi = 0; yi < this.dim_y; yi++) {
+        const x = (this.dim_x - 1) * this.res_x;
+        const y = yi * this.res_y;
+        const h = -2;
+        const n = [0, 1, 0];
+        let color = [0, 0, 0, 0];
+        vertices.push(x, y, h, ...n, ...color);
+      }
+      vertices.push(0, 0, -2, 0, 0, -1, 0, 0, 0, 0);
+      vertices.push(this.res_x * this.dim_x, 0, -2, 0, 0, -1, 0, 0, 0, 0);
+      vertices.push(0, this.res_y * this.dim_y, -2, 0, 0, -1, 0, 0, 0, 0);
+      vertices.push(this.res_x * this.dim_x, this.res_y * this.dim_y, -2, 0, 0, -1, 0, 0, 0, 0);
       let indices = [];
+      const ct = this.dim_x * this.dim_y;
       for (let x = 0; x < this.dim_x - 1; x++) {
         for (let y = 0; y < this.dim_y - 1; y++) {
           indices.push(x + y * this.dim_x);
@@ -1951,11 +2004,56 @@
           indices.push(x + (y + 1) * this.dim_x);
         }
       }
+      for (let x = 0; x < this.dim_x - 1; x++) {
+        indices.push(x + 1 + 0 * this.dim_x);
+        indices.push(x + 0 * this.dim_x);
+        indices.push(ct + x + 0 * this.dim_x);
+        indices.push(x + 1 + 0 * this.dim_x);
+        indices.push(ct + x + 0 * this.dim_x);
+        indices.push(ct + (x + 1) + 0 * this.dim_x);
+      }
+      for (let x = 0; x < this.dim_x - 1; x++) {
+        indices.push(x + 1 + (this.dim_y - 1) * this.dim_x);
+        indices.push(ct + x + this.dim_x);
+        indices.push(x + (this.dim_y - 1) * this.dim_x);
+        indices.push(x + 1 + (this.dim_y - 1) * this.dim_x);
+        indices.push(ct + (x + 1) + this.dim_x);
+        indices.push(ct + x + this.dim_x);
+      }
+      for (let y = 0; y < this.dim_y - 1; y++) {
+        indices.push(y * this.dim_x);
+        indices.push((y + 1) * this.dim_x);
+        indices.push(ct + this.dim_x * 2 + y);
+        indices.push(ct + this.dim_x * 2 + y);
+        indices.push((y + 1) * this.dim_x);
+        indices.push(ct + 1 + this.dim_x * 2 + y);
+      }
+      for (let y = 0; y < this.dim_y - 1; y++) {
+        indices.push(this.dim_x - 1 + y * this.dim_x);
+        indices.push(ct + this.dim_x * 2 + this.dim_y + y);
+        indices.push(this.dim_x - 1 + (y + 1) * this.dim_x);
+        indices.push(this.dim_x - 1 + (y + 1) * this.dim_x);
+        indices.push(ct + this.dim_x * 2 + this.dim_y + y);
+        indices.push(ct + 1 + this.dim_x * 2 + this.dim_y + y);
+      }
+      const ct2 = ct + this.dim_x * 2 + this.dim_y * 2;
+      indices.push(ct2);
+      indices.push(ct2 + 2);
+      indices.push(ct2 + 1);
+      indices.push(ct2 + 2);
+      indices.push(ct2 + 3);
+      indices.push(ct2 + 1);
       console.log(`${vertices.length / 10} verts, ${indices.length} indices`);
       return { vertices: new Float32Array(vertices), indices: new Uint32Array(indices) };
     }
     height(x, y) {
-      return this.noise_octaves.reduce((a, b) => a + b.f(x * b.s_x, y * b.s_y) * b.s_z, 0);
+      const major = this.major_octave.at(x, y);
+      const minor = this.minor_octave.at(x, y);
+      const texture = this.texture_octave.at(x, y);
+      if (major + minor < 3) {
+        return 3;
+      }
+      return major + minor + texture;
     }
     dheight(x, y) {
       const h = this.height(x, y);
@@ -1990,7 +2088,7 @@
   };
 
   // src/color.wgpu
-  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar shadow_sampler: sampler; \r\n\r\n@group(0) @binding(3)\r\nvar shadow_texture: texture_depth_2d;\r\n\r\n@group(0) @binding(4)\r\nvar<uniform> shadow_view: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) world_pos: vec3f,\r\n  @location(2) color : vec3f,\r\n  @location(3) luminance: f32,\r\n  @location(4) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) color: vec4f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.world_pos = position;\r\n  output.normal = normal;\r\n  output.color = color.xyz;\r\n  output.luminance = color.w;\r\n  output.uv = (output.position.xy / output.position.w) * vec2f(0.5, -0.5) + 0.5;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  var color: vec3f = vec3f(0,0,0);\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  color += fragData.luminance;\r\n  color += lights.ambient_luminance;\r\n\r\n  \r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n    return vec4f(0,0,0,1);\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n}";
+  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar shadow_sampler: sampler; \r\n\r\n@group(0) @binding(3)\r\nvar shadow_texture: texture_depth_2d;\r\n\r\n@group(0) @binding(4)\r\nvar<uniform> shadow_view: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) world_pos: vec3f,\r\n  @location(2) color : vec3f,\r\n  @location(3) luminance: f32,\r\n  @location(4) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) color: vec4f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.world_pos = position;\r\n  output.normal = normal;\r\n  output.color = color.xyz;\r\n  output.luminance = color.w;\r\n  output.uv = (output.position.xy / output.position.w) * vec2f(0.5, -0.5) + 0.5;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  var color: vec3f = vec3f(0,0,0);\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  let ambient = lights.ambient_luminance + fragData.luminance;\r\n  color += ambient;\r\n\r\n  \r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n    return vec4f(ambient * fragData.color,1);\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n}";
 
   // src/shadow.wgpu
   var shadow_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  return output;\r\n}\r\n\r\n@fragment fn fragment_main(fragData: VertexOut){}\r\n/*\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return vec4f(1,1,1,1);\r\n}\r\n*/\r\n";
@@ -2014,11 +2112,11 @@
       this.res_x = res_x;
       this.res_y = res_y;
       this.scene = new Scene();
-      this.shadow_res_x = 512;
-      this.shadow_res_y = 512;
+      this.shadow_res_x = 2048;
+      this.shadow_res_y = 2048;
       this.camera = this.make_camera();
       this.raster = this.setup_raster();
-      this.set_shadow(this.scene.shadow_perspectives());
+      this.update_lights();
     }
     camera;
     scene;
@@ -2042,11 +2140,25 @@
     set_shadow(mat) {
       this.device.queue.writeBuffer(this.raster.shadow_view, 0, new Float32Array(mat));
     }
+    update_lights() {
+      this.set_shadow(this.scene.shadow_perspectives());
+      const lights = this.scene.encode_lights();
+      const needed_size = lights.byteLength + VEC_ALIGN;
+      if (this.raster.point_light_buffer.size < needed_size) {
+        this.raster.point_light_buffer.destroy();
+        this.raster.point_light_buffer = this.device.createBuffer({
+          size: needed_size,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+      }
+      this.device.queue.writeBuffer(this.raster.point_light_buffer, 0, new Uint32Array([this.scene.light_count()]));
+      this.device.queue.writeBuffer(this.raster.point_light_buffer, U32_SIZE, new Float32Array([this.scene.ambient_luminance()]));
+      this.device.queue.writeBuffer(this.raster.point_light_buffer, VEC_ALIGN, lights, 0, lights.length);
+    }
     setup_raster() {
       const forward_shader = this.device.createShaderModule({ code: color_shader_src(this.res_x, this.res_y), label: "color shader" });
       const shadow_shader = this.device.createShaderModule({ code: shadow_shader_src(this.res_x, this.res_y), label: "shadow shader" });
       const { vertices, indices } = this.scene.encode_ground_vertices();
-      const lights = this.scene.encode_lights();
       let depth_buffer = this.device.createTexture({
         size: [this.context.canvas.width, this.context.canvas.height],
         format: "depth32float",
@@ -2074,7 +2186,8 @@
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
       });
       const light_buffer = this.device.createBuffer({
-        size: lights.byteLength + U32_SIZE + 16,
+        size: 64,
+        //starting size
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
       });
       const shadow_view_buffer = this.device.createBuffer({
@@ -2082,9 +2195,6 @@
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
       });
       this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
-      this.device.queue.writeBuffer(light_buffer, 0, new Uint32Array([this.scene.light_count()]));
-      this.device.queue.writeBuffer(light_buffer, U32_SIZE, new Float32Array([this.scene.ambient_luminance()]));
-      this.device.queue.writeBuffer(light_buffer, VEC_ALIGN, lights, 0, lights.length);
       this.device.queue.writeBuffer(index_buffer, 0, indices);
       const shadow_vertex_buffers = [
         {
@@ -2255,7 +2365,8 @@
           }]
         },
         primitive: {
-          topology: "triangle-list"
+          topology: "triangle-list",
+          cullMode: "back"
         },
         depthStencil: {
           format: "depth32float",
@@ -2280,7 +2391,8 @@
           // }],
         },
         primitive: {
-          topology: "triangle-list"
+          topology: "triangle-list",
+          cullMode: "none"
         },
         depthStencil: {
           format: "depth32float",
@@ -2375,7 +2487,7 @@
     yaw = 0;
     constructor() {
       this.keymap = /* @__PURE__ */ new Map();
-      this.pos = vec3_exports.fromValues(0, -1, 1);
+      this.pos = vec3_exports.fromValues(20, 20, 20);
       document.addEventListener("keydown", (ev) => {
         this.handle_evenet(ev, true);
       });
@@ -2450,16 +2562,29 @@
     const RES_Y = canvas.height;
     const app = new App(device, context, RES_X, RES_Y);
     const perspective2 = mat4_exports.create();
-    mat4_exports.perspective(perspective2, Math.PI / 2, RES_X / RES_Y, 1, 100);
+    mat4_exports.perspective(perspective2, Math.PI / 2, RES_X / RES_Y, 0.1, 200);
     let t = Math.PI;
     const camera = new Camera();
     const run = () => {
-      t += 8e-3;
+      t += 8e-3 * 0.5;
       camera.update(8e-3);
       let mvp = mat4_exports.create();
       const view = camera.view();
       mat4_exports.multiply(mvp, perspective2, view);
-      const cam = app.scene.shadow_perspectives();
+      const light = app.scene.lights[0];
+      const center = 50;
+      if (Math.sin(t) < 0.4) {
+        light.color = [1, 1, 1];
+        light.luminance = 1;
+        light.dir = [Math.cos(t), 0, Math.sin(t)];
+        light.pos = [-Math.cos(t) * 2 * center + center, center, -Math.sin(t) * 2 * center + center];
+      } else {
+        light.color = [255 / 255, 248 / 255, 222 / 255];
+        light.luminance = 0.5;
+        light.dir = [Math.cos(t), 0, -Math.sin(t)];
+        light.pos = [-Math.cos(t) * 2 * center + center, center, Math.sin(t) * 2 * center + center];
+      }
+      app.update_lights();
       app.set_camera(mvp);
       app.draw_raster();
       requestAnimationFrame(run);

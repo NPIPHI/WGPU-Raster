@@ -11,7 +11,7 @@ export class Camera {
     constructor(){
 
         this.keymap = new Map();
-        this.pos = vec3.fromValues(0,-1,1);
+        this.pos = vec3.fromValues(20,20,20);
         document.addEventListener('keydown', (ev)=>{
             this.handle_evenet(ev, true);
         })
