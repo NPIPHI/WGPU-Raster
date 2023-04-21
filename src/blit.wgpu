@@ -1,0 +1,32 @@
+@group(0) @binding(0)
+var<storage, read> input: array<vec4f>;
+
+struct VertexOut {
+  @builtin(position) position : vec4f,
+  @location(0) color : vec4f
+}
+
+@vertex
+fn vertex_main(@location(0) position: vec4f,
+               @location(1) color: vec4f) -> VertexOut
+{
+  var output : VertexOut;
+  output.position = position;
+  output.color = color;
+  return output;
+}
+
+@fragment
+fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
+{
+  let x = i32(fragData.color.x * RES_X);
+  let y = i32(fragData.color.y * RES_Y);
+  //if(y == 1){
+  //  return input[x + y * RES_X];
+  //} else {
+  //  return vec4f(0,0,0,0);
+  //}
+  return input[x + y * RES_X];
+  //return vec4f(fy,fy,fy,1);
+  //return fragData.color;
+}
