@@ -63,10 +63,10 @@ class Ground {
     minor_octave: NoiseOctave;
     texture_octave: NoiseOctave;
     constructor(){
-        this.dim_x = 1000;
-        this.dim_y = 1000;
-        this.res_x = 0.1;
-        this.res_y = 0.1;
+        this.dim_x = 300    ;
+        this.dim_y = 300;
+        this.res_x = 0.3;
+        this.res_y = 0.3;
         this.major_octave = new NoiseOctave(createNoise2D(alea(10)), 0.01, 0.01, 5);
         this.minor_octave = new NoiseOctave(createNoise2D(alea(20)), 0.1, 0.1, 2);
         this.texture_octave = new NoiseOctave(createNoise2D(alea(30)), 1, 1, 0.02);

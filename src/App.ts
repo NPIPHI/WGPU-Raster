@@ -1,30 +1,59 @@
 import { mat4, vec3 } from "gl-matrix";
 import { Scene } from "./scene";
-import { color_shader_src, compute_shader_src, blit_shader_src, shadow_shader_src } from "./ShaderSrc";
+import { color_shader_src, compute_shader_src, shadow_shader_src, skybox_shader_src } from "./ShaderSrc";
+import { Material, Mesh, Texture } from "./ModelLoad";
+// import { Mesh, OBJ } from "webgl-obj-loader";
 
 const VEC_SIZE = 4;
 const VEC_ALIGN = 16;
 const FLOAT_SIZE = 4;
 const U32_SIZE = 4;
 
+type SceneGeometry = {
+    vertices: GPUBuffer;
+    indices?: {
+        indices: GPUBuffer;
+        index_type: GPUIndexFormat
+    }
+    vertex_count: number;
+    textures: GPUTexture[]
+}
+
+type RenderPass = {
+    shader: GPUShaderModule,
+    pipeline: GPURenderPipeline,
+    bind_groups: GPUBindGroup[],
+    geometries: SceneGeometry[],
+    color_attachments: (GPURenderPassColorAttachment | "canvas")[]
+    depth_attachment: GPURenderPassDepthStencilAttachment
+}
+
+type ComputePass = {
+    shader: GPUShaderModule,
+    pipeline: GPUComputePipeline,
+    bind_groups: GPUBindGroup[],
+    dispatch_size: [number] | [number, number] | [number, number, number]
+}
+
 type RasterData = {
-    vertices: GPUBuffer,
-    indices: GPUBuffer
-    tri_count: number,
     depth_buffer: GPUTexture
-    depth_buffer_view: GPUTextureView,
     point_light_buffer: GPUBuffer,
-
-    forward_shader: GPUShaderModule,
-    forward_pipeline: GPURenderPipeline,
-    forward_bind_group: GPUBindGroup,
-
-    shadow_shader: GPUShaderModule,
-    shadow_bind_group: GPUBindGroup,
-    shadow_pipeline: GPURenderPipeline,
     shadow_depth_buffer: GPUTexture,
-    shadow_depth_buffer_view: GPUTextureView,
-    shadow_view: GPUBuffer,
+    shadow_view_buffer: GPUBuffer,
+    groud_vertex_buffer: GPUBuffer,
+    groud_index_buffer: GPUBuffer,
+    skybox_vertex_buffer: GPUBuffer,
+
+    forward_pass: RenderPass;
+    shadow_pass: RenderPass;
+    skybox_pass: RenderPass;
+}
+
+type ComputeData = {
+    compute_pass: ComputePass
+
+    data_buffer: GPUBuffer;
+    read_buffer: GPUBuffer;
 }
 
 type Camera = {
@@ -32,13 +61,21 @@ type Camera = {
     buffer: GPUBuffer;
 }
 
+type RawMesh = {
+    vertices: number[]
+    
+}
+
 export class App {
     private camera: Camera;
     public scene: Scene;
 
     private raster: RasterData;
+    private compute: ComputeData;
     private shadow_res_x: number;
     private shadow_res_y: number;
+    private clear_color = { r: 0.0, g: 0.5, b: 1.0, a: 1.0 };
+    private texture_cache: Map<ImageBitmap, GPUTexture> = new Map()
 
     constructor(private device: GPUDevice, private context: GPUCanvasContext, private res_x: number, private res_y: number){   
         this.scene = new Scene();
@@ -46,7 +83,74 @@ export class App {
         this.shadow_res_y = 2048;
         this.camera = this.make_camera();
         this.raster = this.setup_raster();
+        this.compute = this.setup_compute();
         this.update_lights();
+    }
+
+    private setup_compute(): ComputeData {
+        let buffer_size = (1 + (1<<10)) * U32_SIZE;
+        const shader = this.device.createShaderModule({code: compute_shader_src(), label: "compute shader"});
+
+        const output_buffer = this.device.createBuffer({
+            size: buffer_size,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.VERTEX
+        })
+
+        const read_buffer = this.device.createBuffer({
+            size: buffer_size,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        })
+
+        const pipeline = this.device.createComputePipeline({
+            layout: "auto",
+            compute: {
+                module: shader, 
+                entryPoint: "main"
+            }
+        })
+        
+        const bind_group_layout = pipeline.getBindGroupLayout(0);
+
+        const bind_group = this.device.createBindGroup({
+            layout: bind_group_layout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: output_buffer
+                    }
+                }
+            ]
+        })
+
+        return {
+            compute_pass: {
+                shader: shader,
+                pipeline: pipeline,
+                bind_groups: [bind_group],
+                dispatch_size: [Math.floor(buffer_size/U32_SIZE/64)]
+            },
+            data_buffer: output_buffer,
+            read_buffer: read_buffer,
+        }
+    }
+
+    private get_texture(texture: Texture) {
+        if(!this.texture_cache.get(texture.data)){
+            let tex = this.device.createTexture({
+                size: [texture.width, texture.height], 
+                format: "rgba8unorm",
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT  
+            });
+
+            if(texture.data) {
+                this.device.queue.copyExternalImageToTexture({source: texture.data }, { texture: tex }, { width : texture.width, height: texture.height});
+            }
+            this.texture_cache.set(texture.data, tex);
+        }
+
+        return this.texture_cache.get(texture.data);
+
     }
 
     private make_camera(): Camera {
@@ -67,7 +171,52 @@ export class App {
     }
 
     set_shadow(mat: mat4) {
-        this.device.queue.writeBuffer(this.raster.shadow_view, 0, new Float32Array(mat));
+        this.device.queue.writeBuffer(this.raster.shadow_view_buffer, 0, new Float32Array(mat));
+    }
+
+    add_mesh(mesh: Mesh) {
+        let vertices = new Float32Array(mesh.vertices.length/3 * 10);
+        let indices = new Uint32Array(mesh.indices);
+        for(let i = 0; i < mesh.vertices.length/3; i++){
+            vertices[i*10+0] = mesh.vertices[i*3+0]
+            vertices[i*10+1] = mesh.vertices[i*3+1]
+            vertices[i*10+2] = mesh.vertices[i*3+2]
+            vertices[i*10+3] = mesh.normals[i*3+0]
+            vertices[i*10+4] = mesh.normals[i*3+1]
+            vertices[i*10+5] = mesh.normals[i*3+2]
+            vertices[i*10+6] = mesh.uvs[i*2+0]
+            vertices[i*10+7] = mesh.uvs[i*2+1];
+            vertices[i*10+8] = 1;
+            vertices[i*10+9] = 0;
+        }
+
+        let vertex_buffer = this.device.createBuffer({
+            size: vertices.byteLength,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX
+        })
+
+        let index_buffer = this.device.createBuffer({
+            size: indices.byteLength,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
+        })
+
+       
+
+        this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
+        this.device.queue.writeBuffer(index_buffer, 0, indices);
+
+        let geo: SceneGeometry = {
+            vertices: vertex_buffer,
+            indices: {
+                indices: index_buffer,
+                index_type: "uint32"
+            },
+            vertex_count: indices.length,
+            textures: [this.get_texture(mesh.material.diffuse)]
+        }
+
+        this.raster.forward_pass.geometries.push(geo);
+        this.raster.shadow_pass.geometries.push(geo);
     }
 
     update_lights(){
@@ -87,16 +236,23 @@ export class App {
     }
 
     private setup_raster(): RasterData {
-        const forward_shader = this.device.createShaderModule({code: color_shader_src(this.res_x, this.res_y), label: "color shader"})
-        const shadow_shader = this.device.createShaderModule({code: shadow_shader_src(this.res_x, this.res_y), label: "shadow shader"})
-        
+        const forward_shader = this.device.createShaderModule({code: color_shader_src(), label: "color shader"})
+        const shadow_shader = this.device.createShaderModule({code: shadow_shader_src(), label: "shadow shader"})
+        const skybox_shader = this.device.createShaderModule({code: skybox_shader_src(), label: "skybox shader"})
+
         const {vertices, indices} = this.scene.encode_ground_vertices();
+        
+        const skybox_verts = new Float32Array([
+            1,3,1,-1,
+            -3,-1,-1,1,
+            1,-1,1,1,
+        ])
 
         let depth_buffer = this.device.createTexture({
             size: [this.context.canvas.width, this.context.canvas.height],
             format: "depth32float",
             usage: GPUTextureUsage.RENDER_ATTACHMENT,
-            label: "forward pass depth buffer",
+            label: "depth buffer",
         });
 
         let shadow_depth_buffer = this.device.createTexture({
@@ -114,12 +270,12 @@ export class App {
 
         })
         
-        const vertex_buffer = this.device.createBuffer({
+        const ground_vertex_buffer = this.device.createBuffer({
             size: vertices.byteLength,
             usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         });
 
-        const index_buffer = this.device.createBuffer({
+        const ground_index_buffer = this.device.createBuffer({
             size: indices.byteLength,
             usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
         })
@@ -133,9 +289,34 @@ export class App {
             size: 16 * FLOAT_SIZE,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         })
+
+        const skybox_vertex_buffer = this.device.createBuffer({
+            size: skybox_verts.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+        })
     
-        this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
-        this.device.queue.writeBuffer(index_buffer, 0, indices);
+        this.device.queue.writeBuffer(ground_vertex_buffer, 0, vertices);
+        this.device.queue.writeBuffer(ground_index_buffer, 0, indices);
+        this.device.queue.writeBuffer(skybox_vertex_buffer, 0, skybox_verts);
+        
+        const skybox_vertex_buffers: GPUVertexBufferLayout[] = [
+            {
+                attributes: [
+                    {
+                        shaderLocation: 0, // position
+                        offset: 0,
+                        format: "float32x2",
+                    },
+                    {
+                        shaderLocation: 1,
+                        offset: 2 * FLOAT_SIZE,
+                        format: "float32x2",
+                    }
+                ],
+                arrayStride: 4 * FLOAT_SIZE,
+                stepMode: "vertex"
+            }
+        ]
           
         const shadow_vertex_buffers: GPUVertexBufferLayout[] = [
             {
@@ -174,6 +355,11 @@ export class App {
               stepMode: "vertex",
             },
         ];
+
+        const skybox_bind_group_layout = this.device.createBindGroupLayout({
+            entries: [],
+            label: "skybox bind group layout",
+        })
     
         const forward_bind_group_layout = this.device.createBindGroupLayout({
             entries: [
@@ -230,6 +416,11 @@ export class App {
             ],
             label: "shadow bind group layout"
         });
+
+        const skybox_layout = this.device.createPipelineLayout({
+            bindGroupLayouts: [skybox_bind_group_layout],
+            label: "skybox layout"
+        })
     
         const forward_layout = this.device.createPipelineLayout({
             bindGroupLayouts: [forward_bind_group_layout],
@@ -241,6 +432,11 @@ export class App {
             label: "shadow layout"
         })
     
+        const skybox_bind_group = this.device.createBindGroup({
+            layout: skybox_bind_group_layout,
+            entries: []
+        });
+
         const forward_bind_group = this.device.createBindGroup({
             layout: forward_bind_group_layout,
             entries: [
@@ -285,6 +481,32 @@ export class App {
             ]
         })
 
+        const skybox_pipeline_descriptor: GPURenderPipelineDescriptor = {
+            vertex: {
+                module: skybox_shader,
+                entryPoint: "vertex_main",
+                buffers: skybox_vertex_buffers,
+            },
+            fragment: {
+                module: skybox_shader,
+                entryPoint: "fragment_main",
+                targets: [{
+                    format: navigator.gpu.getPreferredCanvasFormat(),
+                }]
+            },
+            primitive: {
+                topology: "triangle-list",
+                cullMode: "none"
+            },
+            depthStencil: {
+                format: "depth32float",
+                depthWriteEnabled: false,
+                depthCompare: "less-equal"
+            },
+            layout: skybox_layout,
+            label: "skybox pipieline descriptor"
+        }
+
         const forward_pipeline_descriptor: GPURenderPipelineDescriptor = {
             vertex: {
                 module: forward_shader,
@@ -321,9 +543,6 @@ export class App {
                 module: shadow_shader,
                 entryPoint: "fragment_main",
                 targets: [],
-                // targets: [{
-                //     format: navigator.gpu.getPreferredCanvasFormat(),
-                // }],
             },
             primitive: {
                 topology: "triangle-list",
@@ -340,82 +559,140 @@ export class App {
     
         const forward_render_pipeline = this.device.createRenderPipeline(forward_pipeline_descriptor);
         const shadow_render_pipeline = this.device.createRenderPipeline(shadow_pipeline_descriptor);
+        const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
+
+        const forward_color_attachment = "canvas";
+        const forward_depth_attachment: GPURenderPassDepthStencilAttachment = {
+            view: depth_buffer.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "discard",
+        };
+        const skybox_color_attachmet = "canvas";
+        const skybox_depth_attachment: GPURenderPassDepthStencilAttachment = {
+            view: depth_buffer.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "discard",
+        };
+        // const skybox_depth_attachment = undefined;
+        const shadow_color_attachments = [];
+        const shadow_depth_attachment: GPURenderPassDepthStencilAttachment = {
+            view: shadow_depth_buffer.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+        }
 
         return { 
-            forward_shader: forward_shader,
-            shadow_shader: shadow_shader,
-            forward_pipeline: forward_render_pipeline,
-            shadow_pipeline: shadow_render_pipeline,
-            forward_bind_group: forward_bind_group,
-            shadow_bind_group: shadow_bind_group,
-            vertices: vertex_buffer,
-            indices: index_buffer,
-            tri_count: indices.length / 3,
+            forward_pass: {
+                shader: forward_shader,
+                pipeline: forward_render_pipeline,
+                bind_groups: [forward_bind_group],
+                geometries: [],
+                color_attachments: [forward_color_attachment],
+                depth_attachment: forward_depth_attachment
+            },
+            shadow_pass: {
+                shader: shadow_shader,
+                pipeline: shadow_render_pipeline,
+                bind_groups: [shadow_bind_group],
+                geometries: [],                
+                color_attachments: shadow_color_attachments,
+                depth_attachment: shadow_depth_attachment
+            },
+            skybox_pass: {
+                shader: skybox_shader,
+                pipeline: skybox_render_pipeline,
+                bind_groups: [skybox_bind_group],
+                geometries: [{
+                    vertices: skybox_vertex_buffer,
+                    vertex_count: 3,
+                    textures: []
+                }],
+                color_attachments: [skybox_color_attachmet],
+                depth_attachment: skybox_depth_attachment,
+            },
+            skybox_vertex_buffer: skybox_vertex_buffer,
             depth_buffer: depth_buffer,
-            depth_buffer_view: depth_buffer.createView(),
             shadow_depth_buffer: shadow_depth_buffer,
-            shadow_depth_buffer_view: shadow_depth_buffer.createView(),
             point_light_buffer: light_buffer,
-            shadow_view: shadow_view_buffer
+            shadow_view_buffer: shadow_view_buffer,
+            groud_vertex_buffer: ground_vertex_buffer,
+            groud_index_buffer: ground_index_buffer,
         }
     }
 
-    draw_raster() {
-        const clearColor = { r: 0.0, g: 0.5, b: 1.0, a: 1.0 };
+    private verify_attachments(passes: RenderPass[]){
+        //verify maybe
+    }
 
-        const forward_render_pass_descriptor: GPURenderPassDescriptor = {
-            colorAttachments: [
-                {
-                    clearValue: clearColor,
-                    loadOp: "clear",
-                    storeOp: "store",
+    private make_pass_descriptor(passes: RenderPass[]) : GPURenderPassDescriptor{
+        this.verify_attachments(passes);
+        return {
+            colorAttachments: passes[0].color_attachments.map(a=>{
+                return a == "canvas" ? {
                     view: this.context.getCurrentTexture().createView(),
-                },
-            ],
-            depthStencilAttachment: {
-                view: this.raster.depth_buffer_view,
-                depthClearValue: 1.0,
-                depthLoadOp: "clear",
-                depthStoreOp: "discard",
-            },
-            label: "forward pass descriptor"
-        }; 
+                    clearValue: this.clear_color,
+                    loadOp: "clear",
+                    storeOp: "store"
+                } : a
+            }),
 
-        const shadow_render_pass_descriptor: GPURenderPassDescriptor = {
-            colorAttachments: [],
-            // colorAttachments: [{
-            //     clearValue: clearColor,
-            //     loadOp: "clear",
-            //     storeOp: "store",
-            //     view: this.context.getCurrentTexture().createView(),
-            // }],
-            depthStencilAttachment: {
-                view: this.raster.shadow_depth_buffer_view,
-                depthClearValue: 1.0,
-                depthLoadOp: "clear",
-                depthStoreOp: "store",
-            },
-            label: "shadow pass descriptor"
-        }; 
+            depthStencilAttachment: passes[0].depth_attachment
+        };
+    }
 
+    private encode_compute_pass(pass: ComputePass, encoder: GPUCommandEncoder) {
+        const pass_encoder = encoder.beginComputePass();
+        
+        pass_encoder.setPipeline(pass.pipeline);
+        pass.bind_groups.forEach((group, idx)=>pass_encoder.setBindGroup(idx, group));
+        pass_encoder.dispatchWorkgroups(...pass.dispatch_size);
+
+        pass_encoder.end();
+    }
+
+    private encode_render_passes(passes: RenderPass[], encoder: GPUCommandEncoder) {
+        const pass_descriptor = this.make_pass_descriptor(passes);
+
+        const pass_encoder = encoder.beginRenderPass(pass_descriptor);
+        passes.forEach(pass => {
+            pass_encoder.setPipeline(pass.pipeline);
+            pass.bind_groups.forEach((group, idx)=>pass_encoder.setBindGroup(idx, group));
+            pass.geometries.forEach(geom => {
+                pass_encoder.setVertexBuffer(0, geom.vertices);
+                if(geom.indices){
+                    pass_encoder.setIndexBuffer(geom.indices.indices, geom.indices.index_type);
+                    pass_encoder.drawIndexed(geom.vertex_count);
+                } else {
+                    pass_encoder.draw(geom.vertex_count);
+                }
+            })
+            
+        });
+        
+        pass_encoder.end();
+    }
+
+    draw_raster() {
         const command_encoder = this.device.createCommandEncoder();
 
-        const shadow_pass_encoder = command_encoder.beginRenderPass(shadow_render_pass_descriptor);
-        shadow_pass_encoder.setPipeline(this.raster.shadow_pipeline);
-        shadow_pass_encoder.setVertexBuffer(0, this.raster.vertices);
-        shadow_pass_encoder.setIndexBuffer(this.raster.indices, "uint32")
-        shadow_pass_encoder.setBindGroup(0, this.raster.shadow_bind_group);
-        shadow_pass_encoder.drawIndexed(this.raster.tri_count * 3);
-        shadow_pass_encoder.end();
+        
+        // this.encode_render_passes([this.raster.shadow_pass], command_encoder);
+        this.encode_render_passes([this.raster.forward_pass, this.raster.skybox_pass], command_encoder);
+        // this.encode_compute_pass(this.compute.compute_pass, command_encoder);
+        // command_encoder.copyBufferToBuffer(this.compute.data_buffer, 0, this.compute.read_buffer, 0, this.compute.data_buffer.size);
 
-        const forward_pass_encoder = command_encoder.beginRenderPass(forward_render_pass_descriptor);
-        forward_pass_encoder.setPipeline(this.raster.forward_pipeline);
-        forward_pass_encoder.setVertexBuffer(0, this.raster.vertices);
-        forward_pass_encoder.setIndexBuffer(this.raster.indices, "uint32")
-        forward_pass_encoder.setBindGroup(0, this.raster.forward_bind_group);
-        forward_pass_encoder.drawIndexed(this.raster.tri_count * 3);
-        forward_pass_encoder.end();
-
+        // console.time("QUEUE");
         this.device.queue.submit([command_encoder.finish()]);
+
+        // this.compute.read_buffer.mapAsync(GPUMapMode.READ).then(()=>{
+        //     console.timeEnd("QUEUE");
+        //     const range = this.compute.read_buffer.getMappedRange();
+        //     console.log(range);
+        //     console.log(new Set(new Uint32Array(range)));
+        //     this.compute.read_buffer.unmap();
+        // });
     }
 }

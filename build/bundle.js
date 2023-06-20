@@ -1929,10 +1929,10 @@
     minor_octave;
     texture_octave;
     constructor() {
-      this.dim_x = 1e3;
-      this.dim_y = 1e3;
-      this.res_x = 0.1;
-      this.res_y = 0.1;
+      this.dim_x = 300;
+      this.dim_y = 300;
+      this.res_x = 0.3;
+      this.res_y = 0.3;
       this.major_octave = new NoiseOctave(createNoise2D((0, import_alea.default)(10)), 0.01, 0.01, 5);
       this.minor_octave = new NoiseOctave(createNoise2D((0, import_alea.default)(20)), 0.1, 0.1, 2);
       this.texture_octave = new NoiseOctave(createNoise2D((0, import_alea.default)(30)), 1, 1, 0.02);
@@ -2087,18 +2087,30 @@
     }
   };
 
-  // src/color.wgpu
-  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar shadow_sampler: sampler; \r\n\r\n@group(0) @binding(3)\r\nvar shadow_texture: texture_depth_2d;\r\n\r\n@group(0) @binding(4)\r\nvar<uniform> shadow_view: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) world_pos: vec3f,\r\n  @location(2) color : vec3f,\r\n  @location(3) luminance: f32,\r\n  @location(4) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) color: vec4f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.world_pos = position;\r\n  output.normal = normal;\r\n  output.color = color.xyz;\r\n  output.luminance = color.w;\r\n  output.uv = (output.position.xy / output.position.w) * vec2f(0.5, -0.5) + 0.5;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  var color: vec3f = vec3f(0,0,0);\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  let ambient = lights.ambient_luminance + fragData.luminance;\r\n  color += ambient;\r\n\r\n  \r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n    return vec4f(ambient * fragData.color,1);\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n}";
+  // src/shaders/compute.wgpu
+  var compute_default = "@group(0) @binding(0)\r\nvar<storage, read_write> output: array<atomic<u32>>;\r\n\r\nvar<workgroup> atomic_inc: atomic<u32>;\r\n\r\n@compute @workgroup_size(64)\r\nfn main(\r\n  @builtin(global_invocation_id)\r\n  global_id : vec3u,\r\n\r\n  @builtin(local_invocation_id)\r\n  local_id : vec3u,\r\n) {\r\n  let i = atomicAdd(&output[0], 1);\r\n  atomicStore(&output[global_id.x + 1], i);\r\n  //output[global_id.x + 1] = i;\r\n}";
 
-  // src/shadow.wgpu
+  // src/shaders/color.wgpu
+  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar shadow_sampler: sampler; \r\n\r\n@group(0) @binding(3)\r\nvar shadow_texture: texture_depth_2d;\r\n\r\n@group(0) @binding(4)\r\nvar<uniform> shadow_view: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) world_pos: vec3f,\r\n  @location(2) color : vec3f,\r\n  @location(3) luminance: f32,\r\n  @location(4) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) color: vec4f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.world_pos = position;\r\n  output.normal = normal;\r\n  output.color = color.xyz;\r\n  output.luminance = color.w;\r\n  output.uv = (output.position.xy / output.position.w) * vec2f(0.5, -0.5) + 0.5;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  return vec4f(fragData.color, 1);\r\n  /*\r\n  var color: vec3f = vec3f(0,0,0);\r\n  let directional = dot(fragData.normal, vec3f(0, 1, 0));\r\n  let ambient = 0.2;\r\n  return vec4f(fragData.color * (directional + ambient), 1);\r\n\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  let ambient = lights.ambient_luminance + fragData.luminance;\r\n  color += ambient;\r\n  return vec4f(color * fragData.color, 1);\r\n\r\n\r\n  return vec4f(ambient * fragData.color,1);\r\n\r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n*/\r\n}";
+
+  // src/shaders/shadow.wgpu
   var shadow_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  return output;\r\n}\r\n\r\n@fragment fn fragment_main(fragData: VertexOut){}\r\n/*\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return vec4f(1,1,1,1);\r\n}\r\n*/\r\n";
 
+  // src/shaders/skybox.wgpu
+  var skybox_default = "struct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return vec4f(fragData.uv, 0,1);\r\n}\r\n";
+
   // src/ShaderSrc.ts
-  function color_shader_src(res_x, res_y) {
-    return color_default.replaceAll("RES_X", res_x).replaceAll("RES_Y", res_y);
+  function compute_shader_src() {
+    return compute_default;
   }
-  function shadow_shader_src(res_x, res_y) {
-    return shadow_default.replaceAll("RES_X", res_x).replaceAll("RES_Y", res_y);
+  function color_shader_src() {
+    return color_default;
+  }
+  function shadow_shader_src() {
+    return shadow_default;
+  }
+  function skybox_shader_src() {
+    return skybox_default;
   }
 
   // src/App.ts
@@ -2116,13 +2128,72 @@
       this.shadow_res_y = 2048;
       this.camera = this.make_camera();
       this.raster = this.setup_raster();
+      this.compute = this.setup_compute();
       this.update_lights();
     }
     camera;
     scene;
     raster;
+    compute;
     shadow_res_x;
     shadow_res_y;
+    clear_color = { r: 0, g: 0.5, b: 1, a: 1 };
+    texture_cache = /* @__PURE__ */ new Map();
+    setup_compute() {
+      let buffer_size = (1 + (1 << 10)) * U32_SIZE;
+      const shader = this.device.createShaderModule({ code: compute_shader_src(), label: "compute shader" });
+      const output_buffer = this.device.createBuffer({
+        size: buffer_size,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.VERTEX
+      });
+      const read_buffer = this.device.createBuffer({
+        size: buffer_size,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      const pipeline = this.device.createComputePipeline({
+        layout: "auto",
+        compute: {
+          module: shader,
+          entryPoint: "main"
+        }
+      });
+      const bind_group_layout = pipeline.getBindGroupLayout(0);
+      const bind_group = this.device.createBindGroup({
+        layout: bind_group_layout,
+        entries: [
+          {
+            binding: 0,
+            resource: {
+              buffer: output_buffer
+            }
+          }
+        ]
+      });
+      return {
+        compute_pass: {
+          shader,
+          pipeline,
+          bind_groups: [bind_group],
+          dispatch_size: [Math.floor(buffer_size / U32_SIZE / 64)]
+        },
+        data_buffer: output_buffer,
+        read_buffer
+      };
+    }
+    get_texture(texture) {
+      if (!this.texture_cache.get(texture.data)) {
+        let tex = this.device.createTexture({
+          size: [texture.width, texture.height],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+        });
+        if (texture.data) {
+          this.device.queue.copyExternalImageToTexture({ source: texture.data }, { texture: tex }, { width: texture.width, height: texture.height });
+        }
+        this.texture_cache.set(texture.data, tex);
+      }
+      return this.texture_cache.get(texture.data);
+    }
     make_camera() {
       let mat = mat4_exports.create();
       mat4_exports.identity(mat);
@@ -2138,7 +2209,44 @@
       this.device.queue.writeBuffer(this.camera.buffer, 0, new Float32Array(mat));
     }
     set_shadow(mat) {
-      this.device.queue.writeBuffer(this.raster.shadow_view, 0, new Float32Array(mat));
+      this.device.queue.writeBuffer(this.raster.shadow_view_buffer, 0, new Float32Array(mat));
+    }
+    add_mesh(mesh) {
+      let vertices = new Float32Array(mesh.vertices.length / 3 * 10);
+      let indices = new Uint32Array(mesh.indices);
+      for (let i = 0; i < mesh.vertices.length / 3; i++) {
+        vertices[i * 10 + 0] = mesh.vertices[i * 3 + 0];
+        vertices[i * 10 + 1] = mesh.vertices[i * 3 + 1];
+        vertices[i * 10 + 2] = mesh.vertices[i * 3 + 2];
+        vertices[i * 10 + 3] = mesh.normals[i * 3 + 0];
+        vertices[i * 10 + 4] = mesh.normals[i * 3 + 1];
+        vertices[i * 10 + 5] = mesh.normals[i * 3 + 2];
+        vertices[i * 10 + 6] = mesh.uvs[i * 2 + 0];
+        vertices[i * 10 + 7] = mesh.uvs[i * 2 + 1];
+        vertices[i * 10 + 8] = 1;
+        vertices[i * 10 + 9] = 0;
+      }
+      let vertex_buffer = this.device.createBuffer({
+        size: vertices.byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX
+      });
+      let index_buffer = this.device.createBuffer({
+        size: indices.byteLength,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
+      });
+      this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
+      this.device.queue.writeBuffer(index_buffer, 0, indices);
+      let geo = {
+        vertices: vertex_buffer,
+        indices: {
+          indices: index_buffer,
+          index_type: "uint32"
+        },
+        vertex_count: indices.length,
+        textures: [this.get_texture(mesh.material.diffuse)]
+      };
+      this.raster.forward_pass.geometries.push(geo);
+      this.raster.shadow_pass.geometries.push(geo);
     }
     update_lights() {
       this.set_shadow(this.scene.shadow_perspectives());
@@ -2156,14 +2264,29 @@
       this.device.queue.writeBuffer(this.raster.point_light_buffer, VEC_ALIGN, lights, 0, lights.length);
     }
     setup_raster() {
-      const forward_shader = this.device.createShaderModule({ code: color_shader_src(this.res_x, this.res_y), label: "color shader" });
-      const shadow_shader = this.device.createShaderModule({ code: shadow_shader_src(this.res_x, this.res_y), label: "shadow shader" });
+      const forward_shader = this.device.createShaderModule({ code: color_shader_src(), label: "color shader" });
+      const shadow_shader = this.device.createShaderModule({ code: shadow_shader_src(), label: "shadow shader" });
+      const skybox_shader = this.device.createShaderModule({ code: skybox_shader_src(), label: "skybox shader" });
       const { vertices, indices } = this.scene.encode_ground_vertices();
+      const skybox_verts = new Float32Array([
+        1,
+        3,
+        1,
+        -1,
+        -3,
+        -1,
+        -1,
+        1,
+        1,
+        -1,
+        1,
+        1
+      ]);
       let depth_buffer = this.device.createTexture({
         size: [this.context.canvas.width, this.context.canvas.height],
         format: "depth32float",
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
-        label: "forward pass depth buffer"
+        label: "depth buffer"
       });
       let shadow_depth_buffer = this.device.createTexture({
         size: [this.shadow_res_x, this.shadow_res_y],
@@ -2177,11 +2300,11 @@
         magFilter: "linear",
         minFilter: "linear"
       });
-      const vertex_buffer = this.device.createBuffer({
+      const ground_vertex_buffer = this.device.createBuffer({
         size: vertices.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
       });
-      const index_buffer = this.device.createBuffer({
+      const ground_index_buffer = this.device.createBuffer({
         size: indices.byteLength,
         usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
       });
@@ -2194,8 +2317,32 @@
         size: 16 * FLOAT_SIZE,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
       });
-      this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
-      this.device.queue.writeBuffer(index_buffer, 0, indices);
+      const skybox_vertex_buffer = this.device.createBuffer({
+        size: skybox_verts.byteLength,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+      });
+      this.device.queue.writeBuffer(ground_vertex_buffer, 0, vertices);
+      this.device.queue.writeBuffer(ground_index_buffer, 0, indices);
+      this.device.queue.writeBuffer(skybox_vertex_buffer, 0, skybox_verts);
+      const skybox_vertex_buffers = [
+        {
+          attributes: [
+            {
+              shaderLocation: 0,
+              // position
+              offset: 0,
+              format: "float32x2"
+            },
+            {
+              shaderLocation: 1,
+              offset: 2 * FLOAT_SIZE,
+              format: "float32x2"
+            }
+          ],
+          arrayStride: 4 * FLOAT_SIZE,
+          stepMode: "vertex"
+        }
+      ];
       const shadow_vertex_buffers = [
         {
           attributes: [
@@ -2236,6 +2383,10 @@
           stepMode: "vertex"
         }
       ];
+      const skybox_bind_group_layout = this.device.createBindGroupLayout({
+        entries: [],
+        label: "skybox bind group layout"
+      });
       const forward_bind_group_layout = this.device.createBindGroupLayout({
         entries: [
           {
@@ -2295,6 +2446,10 @@
         ],
         label: "shadow bind group layout"
       });
+      const skybox_layout = this.device.createPipelineLayout({
+        bindGroupLayouts: [skybox_bind_group_layout],
+        label: "skybox layout"
+      });
       const forward_layout = this.device.createPipelineLayout({
         bindGroupLayouts: [forward_bind_group_layout],
         label: "forward layout"
@@ -2302,6 +2457,10 @@
       const shadow_layout = this.device.createPipelineLayout({
         bindGroupLayouts: [shadow_bind_group_layout],
         label: "shadow layout"
+      });
+      const skybox_bind_group = this.device.createBindGroup({
+        layout: skybox_bind_group_layout,
+        entries: []
       });
       const forward_bind_group = this.device.createBindGroup({
         layout: forward_bind_group_layout,
@@ -2351,6 +2510,31 @@
           }
         ]
       });
+      const skybox_pipeline_descriptor = {
+        vertex: {
+          module: skybox_shader,
+          entryPoint: "vertex_main",
+          buffers: skybox_vertex_buffers
+        },
+        fragment: {
+          module: skybox_shader,
+          entryPoint: "fragment_main",
+          targets: [{
+            format: navigator.gpu.getPreferredCanvasFormat()
+          }]
+        },
+        primitive: {
+          topology: "triangle-list",
+          cullMode: "none"
+        },
+        depthStencil: {
+          format: "depth32float",
+          depthWriteEnabled: false,
+          depthCompare: "less-equal"
+        },
+        layout: skybox_layout,
+        label: "skybox pipieline descriptor"
+      };
       const forward_pipeline_descriptor = {
         vertex: {
           module: forward_shader,
@@ -2386,9 +2570,6 @@
           module: shadow_shader,
           entryPoint: "fragment_main",
           targets: []
-          // targets: [{
-          //     format: navigator.gpu.getPreferredCanvasFormat(),
-          // }],
         },
         primitive: {
           topology: "triangle-list",
@@ -2404,74 +2585,110 @@
       };
       const forward_render_pipeline = this.device.createRenderPipeline(forward_pipeline_descriptor);
       const shadow_render_pipeline = this.device.createRenderPipeline(shadow_pipeline_descriptor);
+      const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
+      const forward_color_attachment = "canvas";
+      const forward_depth_attachment = {
+        view: depth_buffer.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "discard"
+      };
+      const skybox_color_attachmet = "canvas";
+      const skybox_depth_attachment = {
+        view: depth_buffer.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "discard"
+      };
+      const shadow_color_attachments = [];
+      const shadow_depth_attachment = {
+        view: shadow_depth_buffer.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "store"
+      };
       return {
-        forward_shader,
-        shadow_shader,
-        forward_pipeline: forward_render_pipeline,
-        shadow_pipeline: shadow_render_pipeline,
-        forward_bind_group,
-        shadow_bind_group,
-        vertices: vertex_buffer,
-        indices: index_buffer,
-        tri_count: indices.length / 3,
+        forward_pass: {
+          shader: forward_shader,
+          pipeline: forward_render_pipeline,
+          bind_groups: [forward_bind_group],
+          geometries: [],
+          color_attachments: [forward_color_attachment],
+          depth_attachment: forward_depth_attachment
+        },
+        shadow_pass: {
+          shader: shadow_shader,
+          pipeline: shadow_render_pipeline,
+          bind_groups: [shadow_bind_group],
+          geometries: [],
+          color_attachments: shadow_color_attachments,
+          depth_attachment: shadow_depth_attachment
+        },
+        skybox_pass: {
+          shader: skybox_shader,
+          pipeline: skybox_render_pipeline,
+          bind_groups: [skybox_bind_group],
+          geometries: [{
+            vertices: skybox_vertex_buffer,
+            vertex_count: 3,
+            textures: []
+          }],
+          color_attachments: [skybox_color_attachmet],
+          depth_attachment: skybox_depth_attachment
+        },
+        skybox_vertex_buffer,
         depth_buffer,
-        depth_buffer_view: depth_buffer.createView(),
         shadow_depth_buffer,
-        shadow_depth_buffer_view: shadow_depth_buffer.createView(),
         point_light_buffer: light_buffer,
-        shadow_view: shadow_view_buffer
+        shadow_view_buffer,
+        groud_vertex_buffer: ground_vertex_buffer,
+        groud_index_buffer: ground_index_buffer
       };
     }
-    draw_raster() {
-      const clearColor = { r: 0, g: 0.5, b: 1, a: 1 };
-      const forward_render_pass_descriptor = {
-        colorAttachments: [
-          {
-            clearValue: clearColor,
+    verify_attachments(passes) {
+    }
+    make_pass_descriptor(passes) {
+      this.verify_attachments(passes);
+      return {
+        colorAttachments: passes[0].color_attachments.map((a) => {
+          return a == "canvas" ? {
+            view: this.context.getCurrentTexture().createView(),
+            clearValue: this.clear_color,
             loadOp: "clear",
-            storeOp: "store",
-            view: this.context.getCurrentTexture().createView()
+            storeOp: "store"
+          } : a;
+        }),
+        depthStencilAttachment: passes[0].depth_attachment
+      };
+    }
+    encode_compute_pass(pass, encoder) {
+      const pass_encoder = encoder.beginComputePass();
+      pass_encoder.setPipeline(pass.pipeline);
+      pass.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx, group));
+      pass_encoder.dispatchWorkgroups(...pass.dispatch_size);
+      pass_encoder.end();
+    }
+    encode_render_passes(passes, encoder) {
+      const pass_descriptor = this.make_pass_descriptor(passes);
+      const pass_encoder = encoder.beginRenderPass(pass_descriptor);
+      passes.forEach((pass) => {
+        pass_encoder.setPipeline(pass.pipeline);
+        pass.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx, group));
+        pass.geometries.forEach((geom) => {
+          pass_encoder.setVertexBuffer(0, geom.vertices);
+          if (geom.indices) {
+            pass_encoder.setIndexBuffer(geom.indices.indices, geom.indices.index_type);
+            pass_encoder.drawIndexed(geom.vertex_count);
+          } else {
+            pass_encoder.draw(geom.vertex_count);
           }
-        ],
-        depthStencilAttachment: {
-          view: this.raster.depth_buffer_view,
-          depthClearValue: 1,
-          depthLoadOp: "clear",
-          depthStoreOp: "discard"
-        },
-        label: "forward pass descriptor"
-      };
-      const shadow_render_pass_descriptor = {
-        colorAttachments: [],
-        // colorAttachments: [{
-        //     clearValue: clearColor,
-        //     loadOp: "clear",
-        //     storeOp: "store",
-        //     view: this.context.getCurrentTexture().createView(),
-        // }],
-        depthStencilAttachment: {
-          view: this.raster.shadow_depth_buffer_view,
-          depthClearValue: 1,
-          depthLoadOp: "clear",
-          depthStoreOp: "store"
-        },
-        label: "shadow pass descriptor"
-      };
+        });
+      });
+      pass_encoder.end();
+    }
+    draw_raster() {
       const command_encoder = this.device.createCommandEncoder();
-      const shadow_pass_encoder = command_encoder.beginRenderPass(shadow_render_pass_descriptor);
-      shadow_pass_encoder.setPipeline(this.raster.shadow_pipeline);
-      shadow_pass_encoder.setVertexBuffer(0, this.raster.vertices);
-      shadow_pass_encoder.setIndexBuffer(this.raster.indices, "uint32");
-      shadow_pass_encoder.setBindGroup(0, this.raster.shadow_bind_group);
-      shadow_pass_encoder.drawIndexed(this.raster.tri_count * 3);
-      shadow_pass_encoder.end();
-      const forward_pass_encoder = command_encoder.beginRenderPass(forward_render_pass_descriptor);
-      forward_pass_encoder.setPipeline(this.raster.forward_pipeline);
-      forward_pass_encoder.setVertexBuffer(0, this.raster.vertices);
-      forward_pass_encoder.setIndexBuffer(this.raster.indices, "uint32");
-      forward_pass_encoder.setBindGroup(0, this.raster.forward_bind_group);
-      forward_pass_encoder.drawIndexed(this.raster.tri_count * 3);
-      forward_pass_encoder.end();
+      this.encode_render_passes([this.raster.forward_pass, this.raster.skybox_pass], command_encoder);
       this.device.queue.submit([command_encoder.finish()]);
     }
   };
@@ -2480,7 +2697,7 @@
   var Camera = class {
     keymap;
     pos;
-    speed = 10;
+    speed = 100;
     pitch_sensitivity = 0.01;
     yaw_sensitivity = 0.01;
     pitch = 0;
@@ -2537,6 +2754,68 @@
     }
   };
 
+  // src/ModelLoad.ts
+  async function load_material(mat, parent_path) {
+    if (mat.diffuse) {
+      let split = mat.diffuse.split(".");
+      if (split[split.length - 1] == "png") {
+        let tex = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
+        return { diffuse: tex };
+      } else {
+        return blank_material();
+      }
+    } else {
+      return blank_material();
+    }
+  }
+  async function load_texture(path) {
+    let blob = await (await fetch(path)).blob();
+    let img = await createImageBitmap(blob, { colorSpaceConversion: "none" });
+    return {
+      width: img.width,
+      height: img.height,
+      data: img
+    };
+  }
+  function blank_material() {
+    return {
+      diffuse: {
+        width: 1,
+        height: 1,
+        data: null
+      }
+    };
+  }
+  async function load_json_model(path) {
+    let model = await (await fetch(path)).json();
+    let materials = await Promise.all(model.materials.map((m) => {
+      return load_material(m, path);
+    }));
+    return model.meshes.map((m) => {
+      let verts = [];
+      let norms = [];
+      let uvs = [];
+      for (let i = 0; i < m.vertices.length; i += 8) {
+        verts.push(m.vertices[i]);
+        verts.push(m.vertices[i + 1]);
+        verts.push(m.vertices[i + 2]);
+        norms.push(m.vertices[i + 3]);
+        norms.push(m.vertices[i + 4]);
+        norms.push(m.vertices[i + 5]);
+        uvs.push(m.vertices[i + 6]);
+        uvs.push(m.vertices[i + 7]);
+      }
+      return {
+        vertices: verts,
+        normals: norms,
+        uvs,
+        indices: m.indices,
+        material: materials[m.material_index],
+        name: m.name
+      };
+    });
+  }
+
   // src/main.ts
   async function main() {
     const canvas = document.getElementById("gpuCanvas");
@@ -2562,28 +2841,27 @@
     const RES_Y = canvas.height;
     const app = new App(device, context, RES_X, RES_Y);
     const perspective2 = mat4_exports.create();
-    mat4_exports.perspective(perspective2, Math.PI / 2, RES_X / RES_Y, 0.1, 200);
+    mat4_exports.perspective(perspective2, Math.PI / 2, RES_X / RES_Y, 0.1, null);
+    load_json_model("StgDolpic_Chikei/verts.json").then((meshes) => {
+      meshes.forEach((mesh) => {
+        if (mesh.indices.length > 0) {
+          app.add_mesh(mesh);
+        }
+      });
+    });
     let t = Math.PI;
     const camera = new Camera();
     const run = () => {
-      t += 8e-3 * 0.5;
       camera.update(8e-3);
       let mvp = mat4_exports.create();
       const view = camera.view();
       mat4_exports.multiply(mvp, perspective2, view);
       const light = app.scene.lights[0];
       const center = 50;
-      if (Math.sin(t) < 0.4) {
-        light.color = [1, 1, 1];
-        light.luminance = 1;
-        light.dir = [Math.cos(t), 0, Math.sin(t)];
-        light.pos = [-Math.cos(t) * 2 * center + center, center, -Math.sin(t) * 2 * center + center];
-      } else {
-        light.color = [255 / 255, 248 / 255, 222 / 255];
-        light.luminance = 0.5;
-        light.dir = [Math.cos(t), 0, -Math.sin(t)];
-        light.pos = [-Math.cos(t) * 2 * center + center, center, Math.sin(t) * 2 * center + center];
-      }
+      light.color = [1, 1, 1];
+      light.luminance = 1;
+      light.dir = [Math.cos(t), 0, Math.sin(t)];
+      light.pos = [-Math.cos(t) * 2 * center + center, center, -Math.sin(t) * 2 * center + center];
       app.update_lights();
       app.set_camera(mvp);
       app.draw_raster();

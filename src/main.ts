@@ -2,6 +2,8 @@ import { mat4, vec3 } from "gl-matrix";
 import { App } from "./App";
 import { Camera } from "./camera";
 import { SpotLight } from "./scene";
+import { OBJ } from "webgl-obj-loader"
+import { load_json_model } from "./ModelLoad";
 
 async function main(){
     const canvas: HTMLCanvasElement = <HTMLCanvasElement>document.getElementById("gpuCanvas");
@@ -9,7 +11,7 @@ async function main(){
     const gpu = navigator.gpu;
 
     canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
+    canvas.height = window.innerHeight;
     
     const adapter = await gpu.requestAdapter({powerPreference: "high-performance"});
 
@@ -39,7 +41,21 @@ canvas.height = window.innerHeight;
     // app.exec_compute();
     // app.draw_blit();
     const perspective = mat4.create();
-    mat4.perspective(perspective, Math.PI/2, RES_X/RES_Y, 0.1, 200);
+    mat4.perspective(perspective, Math.PI/2, RES_X/RES_Y, 0.1, null);
+
+    // fetch("./Delfino Plaza.obj").then(data=>data.text()).then(str=>{
+    //     const model = new OBJ.Mesh(str);
+    //     app.set_mesh(model);
+    //     // app.draw_raster();
+    // });
+    load_json_model("StgDolpic_Chikei/verts.json").then((meshes)=>{
+        meshes.forEach(mesh=>{
+            if(mesh.indices.length > 0){
+                app.add_mesh(mesh)
+            }
+        });
+    });
+
 
     // const dir_shadow = mat4.create();
     // // mat4.ortho(dir_shadow, 10, -10, 10, -10, 1, 100);
@@ -57,24 +73,17 @@ canvas.height = window.innerHeight;
     let t = Math.PI;
     const camera = new Camera();
     const run = ()=>{
-        t += 0.008 * 0.5;
+        // t += 0.008 * 0.5;
         camera.update(0.008)
         let mvp = mat4.create();
         const view = camera.view();
         mat4.multiply(mvp, perspective, view);
         const light = <SpotLight>app.scene.lights[0];
         const center = 50;
-        if(Math.sin(t) < 0.4){
-            light.color = [1,1,1];
-            light.luminance = 1;
-            light.dir = [Math.cos(t), 0, Math.sin(t)];
-            light.pos = [-Math.cos(t)*2*center+center, center, -Math.sin(t)*2*center+center];
-        } else {
-            light.color = [0xff/255,0xf8/255,0x0de/255];
-            light.luminance = 0.5;
-            light.dir = [Math.cos(t), 0, -Math.sin(t)];
-            light.pos = [-Math.cos(t)*2*center+center, center, Math.sin(t)*2*center+center];
-        }
+        light.color = [1,1,1];
+        light.luminance = 1;
+        light.dir = [Math.cos(t), 0, Math.sin(t)];
+        light.pos = [-Math.cos(t)*2*center+center, center, -Math.sin(t)*2*center+center];
         
         app.update_lights();
 

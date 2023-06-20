@@ -14,6 +14,7 @@
     "alea": "^1.0.1",
     "esbuild": "0.17.15",
     "gl-matrix": "^3.4.3",
-    "simplex-noise": "^4.0.1"
+    "simplex-noise": "^4.0.1",
+    "webgl-obj-loader": "^2.0.8"
   }
 }

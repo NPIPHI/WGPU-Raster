@@ -3,7 +3,7 @@ import { mat3, mat4, vec2, vec3 } from "gl-matrix"
 export class Camera {
     private keymap: Map<string, boolean>;
     private pos: vec3;
-    private speed: number = 10;
+    private speed: number = 100;
     private pitch_sensitivity = 0.01;
     private yaw_sensitivity = 0.01;
     private pitch: number = 0;
