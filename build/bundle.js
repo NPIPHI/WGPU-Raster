@@ -2091,7 +2091,7 @@
   var compute_default = "@group(0) @binding(0)\r\nvar<storage, read_write> output: array<atomic<u32>>;\r\n\r\nvar<workgroup> atomic_inc: atomic<u32>;\r\n\r\n@compute @workgroup_size(64)\r\nfn main(\r\n  @builtin(global_invocation_id)\r\n  global_id : vec3u,\r\n\r\n  @builtin(local_invocation_id)\r\n  local_id : vec3u,\r\n) {\r\n  let i = atomicAdd(&output[0], 1);\r\n  atomicStore(&output[global_id.x + 1], i);\r\n  //output[global_id.x + 1] = i;\r\n}";
 
   // src/shaders/color.wgpu
-  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar shadow_sampler: sampler; \r\n\r\n@group(0) @binding(3)\r\nvar shadow_texture: texture_depth_2d;\r\n\r\n@group(0) @binding(4)\r\nvar<uniform> shadow_view: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) world_pos: vec3f,\r\n  @location(2) color : vec3f,\r\n  @location(3) luminance: f32,\r\n  @location(4) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) color: vec4f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.world_pos = position;\r\n  output.normal = normal;\r\n  output.color = color.xyz;\r\n  output.luminance = color.w;\r\n  output.uv = (output.position.xy / output.position.w) * vec2f(0.5, -0.5) + 0.5;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  return vec4f(fragData.color, 1);\r\n  /*\r\n  var color: vec3f = vec3f(0,0,0);\r\n  let directional = dot(fragData.normal, vec3f(0, 1, 0));\r\n  let ambient = 0.2;\r\n  return vec4f(fragData.color * (directional + ambient), 1);\r\n\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  let ambient = lights.ambient_luminance + fragData.luminance;\r\n  color += ambient;\r\n  return vec4f(color * fragData.color, 1);\r\n\r\n\r\n  return vec4f(ambient * fragData.color,1);\r\n\r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n*/\r\n}";
+  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar tex_sampler: sampler; \r\n\r\n@group(1) @binding(3)\r\nvar diffuse_texture : texture_2d<f32>;\r\n\r\n@group(1) @binding(4)\r\nvar opacity_texture : texture_2d<f32>;\r\n\r\noverride has_opacity: bool;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.normal = normal;\r\n  output.uv = vec2(uv.x, 1-uv.y);\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);\r\n  var opacity = 1.0; \r\n  if(has_opacity){\r\n    opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;\r\n  }\r\n\r\n  let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;\r\n  let ambient_light = 0.5;\r\n  let lighted_color = color * (directional_light + ambient_light);\r\n  return vec4(lighted_color.xyz,opacity);\r\n  /*\r\n  var color: vec3f = vec3f(0,0,0);\r\n  let directional = dot(fragData.normal, vec3f(0, 1, 0));\r\n  let ambient = 0.2;\r\n  return vec4f(fragData.color * (directional + ambient), 1);\r\n\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  let ambient = lights.ambient_luminance + fragData.luminance;\r\n  color += ambient;\r\n  return vec4f(color * fragData.color, 1);\r\n\r\n\r\n  return vec4f(ambient * fragData.color,1);\r\n\r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n*/\r\n}";
 
   // src/shaders/shadow.wgpu
   var shadow_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  return output;\r\n}\r\n\r\n@fragment fn fragment_main(fragData: VertexOut){}\r\n/*\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return vec4f(1,1,1,1);\r\n}\r\n*/\r\n";
@@ -2139,6 +2139,7 @@
     shadow_res_y;
     clear_color = { r: 0, g: 0.5, b: 1, a: 1 };
     texture_cache = /* @__PURE__ */ new Map();
+    forward_layout;
     setup_compute() {
       let buffer_size = (1 + (1 << 10)) * U32_SIZE;
       const shader = this.device.createShaderModule({ code: compute_shader_src(), label: "compute shader" });
@@ -2187,10 +2188,11 @@
           format: "rgba8unorm",
           usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
         });
+        let view = tex.createView();
         if (texture.data) {
           this.device.queue.copyExternalImageToTexture({ source: texture.data }, { texture: tex }, { width: texture.width, height: texture.height });
         }
-        this.texture_cache.set(texture.data, tex);
+        this.texture_cache.set(texture.data, { tex, view });
       }
       return this.texture_cache.get(texture.data);
     }
@@ -2212,19 +2214,17 @@
       this.device.queue.writeBuffer(this.raster.shadow_view_buffer, 0, new Float32Array(mat));
     }
     add_mesh(mesh) {
-      let vertices = new Float32Array(mesh.vertices.length / 3 * 10);
+      let vertices = new Float32Array(mesh.vertices.length / 3 * 8);
       let indices = new Uint32Array(mesh.indices);
       for (let i = 0; i < mesh.vertices.length / 3; i++) {
-        vertices[i * 10 + 0] = mesh.vertices[i * 3 + 0];
-        vertices[i * 10 + 1] = mesh.vertices[i * 3 + 1];
-        vertices[i * 10 + 2] = mesh.vertices[i * 3 + 2];
-        vertices[i * 10 + 3] = mesh.normals[i * 3 + 0];
-        vertices[i * 10 + 4] = mesh.normals[i * 3 + 1];
-        vertices[i * 10 + 5] = mesh.normals[i * 3 + 2];
-        vertices[i * 10 + 6] = mesh.uvs[i * 2 + 0];
-        vertices[i * 10 + 7] = mesh.uvs[i * 2 + 1];
-        vertices[i * 10 + 8] = 1;
-        vertices[i * 10 + 9] = 0;
+        vertices[i * 8 + 0] = mesh.vertices[i * 3 + 0];
+        vertices[i * 8 + 1] = mesh.vertices[i * 3 + 1];
+        vertices[i * 8 + 2] = mesh.vertices[i * 3 + 2];
+        vertices[i * 8 + 3] = mesh.normals[i * 3 + 0];
+        vertices[i * 8 + 4] = mesh.normals[i * 3 + 1];
+        vertices[i * 8 + 5] = mesh.normals[i * 3 + 2];
+        vertices[i * 8 + 6] = mesh.uvs[i * 2 + 0];
+        vertices[i * 8 + 7] = mesh.uvs[i * 2 + 1];
       }
       let vertex_buffer = this.device.createBuffer({
         size: vertices.byteLength,
@@ -2236,6 +2236,42 @@
       });
       this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
       this.device.queue.writeBuffer(index_buffer, 0, indices);
+      let diffuse = this.get_texture(mesh.material.diffuse);
+      let bind_group;
+      if (mesh.material.opacity) {
+        let opacity = this.get_texture(mesh.material.opacity);
+        bind_group = this.device.createBindGroup({
+          layout: this.forward_layout,
+          entries: [
+            {
+              binding: 3,
+              //diffuse view
+              resource: diffuse.view
+            },
+            {
+              binding: 4,
+              //opacity view
+              resource: opacity.view
+            }
+          ]
+        });
+      } else {
+        bind_group = this.device.createBindGroup({
+          layout: this.forward_layout,
+          entries: [
+            {
+              binding: 3,
+              //diffuse view
+              resource: diffuse.view
+            },
+            {
+              binding: 4,
+              //unused, for simplicity
+              resource: diffuse.view
+            }
+          ]
+        });
+      }
       let geo = {
         vertices: vertex_buffer,
         indices: {
@@ -2243,10 +2279,13 @@
           index_type: "uint32"
         },
         vertex_count: indices.length,
-        textures: [this.get_texture(mesh.material.diffuse)]
+        bind_groups: [bind_group]
       };
-      this.raster.forward_pass.geometries.push(geo);
-      this.raster.shadow_pass.geometries.push(geo);
+      if (mesh.material.opacity) {
+        this.raster.forward_diffuse_opacity_pass.geometries.push(geo);
+      } else {
+        this.raster.forward_diffuse_pass.geometries.push(geo);
+      }
     }
     update_lights() {
       this.set_shadow(this.scene.shadow_perspectives());
@@ -2267,7 +2306,6 @@
       const forward_shader = this.device.createShaderModule({ code: color_shader_src(), label: "color shader" });
       const shadow_shader = this.device.createShaderModule({ code: shadow_shader_src(), label: "shadow shader" });
       const skybox_shader = this.device.createShaderModule({ code: skybox_shader_src(), label: "skybox shader" });
-      const { vertices, indices } = this.scene.encode_ground_vertices();
       const skybox_verts = new Float32Array([
         1,
         3,
@@ -2294,19 +2332,11 @@
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         label: "shadow pass depth buffer"
       });
-      let shadow_sampler = this.device.createSampler({
-        addressModeU: "clamp-to-edge",
-        addressModeV: "clamp-to-edge",
+      let tex_sampler = this.device.createSampler({
+        addressModeU: "repeat",
+        addressModeV: "repeat",
         magFilter: "linear",
         minFilter: "linear"
-      });
-      const ground_vertex_buffer = this.device.createBuffer({
-        size: vertices.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-      });
-      const ground_index_buffer = this.device.createBuffer({
-        size: indices.byteLength,
-        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
       });
       const light_buffer = this.device.createBuffer({
         size: 64,
@@ -2321,10 +2351,8 @@
         size: skybox_verts.byteLength,
         usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
       });
-      this.device.queue.writeBuffer(ground_vertex_buffer, 0, vertices);
-      this.device.queue.writeBuffer(ground_index_buffer, 0, indices);
       this.device.queue.writeBuffer(skybox_vertex_buffer, 0, skybox_verts);
-      const skybox_vertex_buffers = [
+      const skybox_vertex_layout = [
         {
           attributes: [
             {
@@ -2343,7 +2371,7 @@
           stepMode: "vertex"
         }
       ];
-      const shadow_vertex_buffers = [
+      const shadow_vertex_layout = [
         {
           attributes: [
             {
@@ -2357,7 +2385,7 @@
           stepMode: "vertex"
         }
       ];
-      const forward_vertex_buffers = [
+      const forward_vertex_layout = [
         {
           attributes: [
             {
@@ -2374,12 +2402,12 @@
             },
             {
               shaderLocation: 2,
-              // color
+              // uv
               offset: 24,
-              format: "float32x4"
+              format: "float32x2"
             }
           ],
-          arrayStride: 40,
+          arrayStride: 32,
           stepMode: "vertex"
         }
       ];
@@ -2387,7 +2415,7 @@
         entries: [],
         label: "skybox bind group layout"
       });
-      const forward_bind_group_layout = this.device.createBindGroupLayout({
+      const forward_bind_group_frame_layout = this.device.createBindGroupLayout({
         entries: [
           {
             binding: 0,
@@ -2411,28 +2439,36 @@
             sampler: {
               type: "filtering"
             }
-          },
+          }
+        ],
+        label: "forward bind group layout"
+      });
+      const forward_bind_group_material_layout = this.device.createBindGroupLayout({
+        entries: [
           {
             binding: 3,
-            //shadow tex
+            //diffuse tex
             visibility: GPUShaderStage.FRAGMENT,
             texture: {
-              sampleType: "depth",
+              sampleType: "float",
               viewDimension: "2d",
               multisampled: false
             }
           },
           {
             binding: 4,
-            //shadow view
+            //opacity tex
             visibility: GPUShaderStage.FRAGMENT,
-            buffer: {
-              type: "uniform"
+            texture: {
+              sampleType: "float",
+              viewDimension: "2d",
+              multisampled: false
             }
           }
         ],
         label: "forward bind group layout"
       });
+      this.forward_layout = forward_bind_group_material_layout;
       const shadow_bind_group_layout = this.device.createBindGroupLayout({
         entries: [
           {
@@ -2451,7 +2487,7 @@
         label: "skybox layout"
       });
       const forward_layout = this.device.createPipelineLayout({
-        bindGroupLayouts: [forward_bind_group_layout],
+        bindGroupLayouts: [forward_bind_group_frame_layout, forward_bind_group_material_layout],
         label: "forward layout"
       });
       const shadow_layout = this.device.createPipelineLayout({
@@ -2463,7 +2499,7 @@
         entries: []
       });
       const forward_bind_group = this.device.createBindGroup({
-        layout: forward_bind_group_layout,
+        layout: forward_bind_group_frame_layout,
         entries: [
           {
             binding: 0,
@@ -2481,20 +2517,8 @@
           },
           {
             binding: 2,
-            //shadows sampler
-            resource: shadow_sampler
-          },
-          {
-            binding: 3,
-            //shadows tex
-            resource: shadow_depth_buffer.createView()
-          },
-          {
-            binding: 4,
-            //shadow view
-            resource: {
-              buffer: shadow_view_buffer
-            }
+            //tex sampler
+            resource: tex_sampler
           }
         ]
       });
@@ -2510,11 +2534,23 @@
           }
         ]
       });
+      const blend_mode = {
+        alpha: {
+          srcFactor: "src-alpha",
+          dstFactor: "one-minus-src-alpha",
+          operation: "add"
+        },
+        color: {
+          srcFactor: "src-alpha",
+          dstFactor: "one-minus-src-alpha",
+          operation: "add"
+        }
+      };
       const skybox_pipeline_descriptor = {
         vertex: {
           module: skybox_shader,
           entryPoint: "vertex_main",
-          buffers: skybox_vertex_buffers
+          buffers: skybox_vertex_layout
         },
         fragment: {
           module: skybox_shader,
@@ -2535,18 +2571,51 @@
         layout: skybox_layout,
         label: "skybox pipieline descriptor"
       };
-      const forward_pipeline_descriptor = {
+      const forward_diffuse_pipeline_descriptor = {
         vertex: {
           module: forward_shader,
           entryPoint: "vertex_main",
-          buffers: forward_vertex_buffers
+          buffers: forward_vertex_layout
         },
         fragment: {
           module: forward_shader,
           entryPoint: "fragment_main",
           targets: [{
-            format: navigator.gpu.getPreferredCanvasFormat()
-          }]
+            format: navigator.gpu.getPreferredCanvasFormat(),
+            blend: blend_mode
+          }],
+          constants: {
+            has_opacity: 0
+          }
+        },
+        primitive: {
+          topology: "triangle-list",
+          cullMode: "back"
+        },
+        depthStencil: {
+          format: "depth32float",
+          depthWriteEnabled: true,
+          depthCompare: "less"
+        },
+        layout: forward_layout,
+        label: "forward pipeline descriptor"
+      };
+      const forward_diffuse_opacity_pipeline_descriptor = {
+        vertex: {
+          module: forward_shader,
+          entryPoint: "vertex_main",
+          buffers: forward_vertex_layout
+        },
+        fragment: {
+          module: forward_shader,
+          entryPoint: "fragment_main",
+          targets: [{
+            format: navigator.gpu.getPreferredCanvasFormat(),
+            blend: blend_mode
+          }],
+          constants: {
+            has_opacity: 1
+          }
         },
         primitive: {
           topology: "triangle-list",
@@ -2564,7 +2633,7 @@
         vertex: {
           module: shadow_shader,
           entryPoint: "vertex_main",
-          buffers: shadow_vertex_buffers
+          buffers: shadow_vertex_layout
         },
         fragment: {
           module: shadow_shader,
@@ -2573,7 +2642,7 @@
         },
         primitive: {
           topology: "triangle-list",
-          cullMode: "none"
+          cullMode: "back"
         },
         depthStencil: {
           format: "depth32float",
@@ -2583,7 +2652,8 @@
         layout: shadow_layout,
         label: "shadow pipeline descriptor"
       };
-      const forward_render_pipeline = this.device.createRenderPipeline(forward_pipeline_descriptor);
+      const forward_diffuse_render_pipeline = this.device.createRenderPipeline(forward_diffuse_pipeline_descriptor);
+      const forward_diffuse_opacity_render_pipeline = this.device.createRenderPipeline(forward_diffuse_opacity_pipeline_descriptor);
       const shadow_render_pipeline = this.device.createRenderPipeline(shadow_pipeline_descriptor);
       const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
       const forward_color_attachment = "canvas";
@@ -2608,9 +2678,17 @@
         depthStoreOp: "store"
       };
       return {
-        forward_pass: {
+        forward_diffuse_pass: {
           shader: forward_shader,
-          pipeline: forward_render_pipeline,
+          pipeline: forward_diffuse_render_pipeline,
+          bind_groups: [forward_bind_group],
+          geometries: [],
+          color_attachments: [forward_color_attachment],
+          depth_attachment: forward_depth_attachment
+        },
+        forward_diffuse_opacity_pass: {
+          shader: forward_shader,
+          pipeline: forward_diffuse_opacity_render_pipeline,
           bind_groups: [forward_bind_group],
           geometries: [],
           color_attachments: [forward_color_attachment],
@@ -2631,7 +2709,7 @@
           geometries: [{
             vertices: skybox_vertex_buffer,
             vertex_count: 3,
-            textures: []
+            bind_groups: []
           }],
           color_attachments: [skybox_color_attachmet],
           depth_attachment: skybox_depth_attachment
@@ -2640,9 +2718,7 @@
         depth_buffer,
         shadow_depth_buffer,
         point_light_buffer: light_buffer,
-        shadow_view_buffer,
-        groud_vertex_buffer: ground_vertex_buffer,
-        groud_index_buffer: ground_index_buffer
+        shadow_view_buffer
       };
     }
     verify_attachments(passes) {
@@ -2676,6 +2752,7 @@
         pass.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx, group));
         pass.geometries.forEach((geom) => {
           pass_encoder.setVertexBuffer(0, geom.vertices);
+          geom.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx + pass.bind_groups.length, group));
           if (geom.indices) {
             pass_encoder.setIndexBuffer(geom.indices.indices, geom.indices.index_type);
             pass_encoder.drawIndexed(geom.vertex_count);
@@ -2688,7 +2765,7 @@
     }
     draw_raster() {
       const command_encoder = this.device.createCommandEncoder();
-      this.encode_render_passes([this.raster.forward_pass, this.raster.skybox_pass], command_encoder);
+      this.encode_render_passes([this.raster.forward_diffuse_pass, this.raster.forward_diffuse_opacity_pass, this.raster.skybox_pass], command_encoder);
       this.device.queue.submit([command_encoder.finish()]);
     }
   };
@@ -2756,17 +2833,26 @@
 
   // src/ModelLoad.ts
   async function load_material(mat, parent_path) {
+    let diffuse;
+    let opacity;
     if (mat.diffuse) {
-      let split = mat.diffuse.split(".");
-      if (split[split.length - 1] == "png") {
-        let tex = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
-        return { diffuse: tex };
-      } else {
-        return blank_material();
+      try {
+        diffuse = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
+      } catch (e) {
+        diffuse = await blank_texture();
+        console.log(`Error loading ${mat.diffuse}`);
       }
     } else {
-      return blank_material();
+      diffuse = await blank_texture();
     }
+    if (mat.opacity) {
+      try {
+        opacity = await load_texture("StgDolpic_Chikei/" + mat.opacity);
+      } catch (e) {
+        console.log(`Error loading ${mat.opacity}`);
+      }
+    }
+    return { diffuse, opacity };
   }
   async function load_texture(path) {
     let blob = await (await fetch(path)).blob();
@@ -2777,14 +2863,8 @@
       data: img
     };
   }
-  function blank_material() {
-    return {
-      diffuse: {
-        width: 1,
-        height: 1,
-        data: null
-      }
-    };
+  async function blank_texture() {
+    return await load_texture("missing.png");
   }
   async function load_json_model(path) {
     let model = await (await fetch(path)).json();

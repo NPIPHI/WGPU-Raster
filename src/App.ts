@@ -16,7 +16,7 @@ type SceneGeometry = {
         index_type: GPUIndexFormat
     }
     vertex_count: number;
-    textures: GPUTexture[]
+    bind_groups: GPUBindGroup[]
 }
 
 type RenderPass = {
@@ -40,11 +40,10 @@ type RasterData = {
     point_light_buffer: GPUBuffer,
     shadow_depth_buffer: GPUTexture,
     shadow_view_buffer: GPUBuffer,
-    groud_vertex_buffer: GPUBuffer,
-    groud_index_buffer: GPUBuffer,
     skybox_vertex_buffer: GPUBuffer,
 
-    forward_pass: RenderPass;
+    forward_diffuse_pass: RenderPass;
+    forward_diffuse_opacity_pass: RenderPass;
     shadow_pass: RenderPass;
     skybox_pass: RenderPass;
 }
@@ -75,7 +74,8 @@ export class App {
     private shadow_res_x: number;
     private shadow_res_y: number;
     private clear_color = { r: 0.0, g: 0.5, b: 1.0, a: 1.0 };
-    private texture_cache: Map<ImageBitmap, GPUTexture> = new Map()
+    private texture_cache: Map<ImageBitmap, {tex: GPUTexture, view: GPUTextureView}> = new Map()
+    private forward_layout: GPUBindGroupLayout;
 
     constructor(private device: GPUDevice, private context: GPUCanvasContext, private res_x: number, private res_y: number){   
         this.scene = new Scene();
@@ -143,10 +143,12 @@ export class App {
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT  
             });
 
+            let view = tex.createView();
+
             if(texture.data) {
                 this.device.queue.copyExternalImageToTexture({source: texture.data }, { texture: tex }, { width : texture.width, height: texture.height});
             }
-            this.texture_cache.set(texture.data, tex);
+            this.texture_cache.set(texture.data, {tex, view});
         }
 
         return this.texture_cache.get(texture.data);
@@ -175,19 +177,17 @@ export class App {
     }
 
     add_mesh(mesh: Mesh) {
-        let vertices = new Float32Array(mesh.vertices.length/3 * 10);
+        let vertices = new Float32Array(mesh.vertices.length/3 * 8);
         let indices = new Uint32Array(mesh.indices);
         for(let i = 0; i < mesh.vertices.length/3; i++){
-            vertices[i*10+0] = mesh.vertices[i*3+0]
-            vertices[i*10+1] = mesh.vertices[i*3+1]
-            vertices[i*10+2] = mesh.vertices[i*3+2]
-            vertices[i*10+3] = mesh.normals[i*3+0]
-            vertices[i*10+4] = mesh.normals[i*3+1]
-            vertices[i*10+5] = mesh.normals[i*3+2]
-            vertices[i*10+6] = mesh.uvs[i*2+0]
-            vertices[i*10+7] = mesh.uvs[i*2+1];
-            vertices[i*10+8] = 1;
-            vertices[i*10+9] = 0;
+            vertices[i*8+0] = mesh.vertices[i*3+0]
+            vertices[i*8+1] = mesh.vertices[i*3+1]
+            vertices[i*8+2] = mesh.vertices[i*3+2]
+            vertices[i*8+3] = mesh.normals[i*3+0]
+            vertices[i*8+4] = mesh.normals[i*3+1]
+            vertices[i*8+5] = mesh.normals[i*3+2]
+            vertices[i*8+6] = mesh.uvs[i*2+0]
+            vertices[i*8+7] = mesh.uvs[i*2+1];
         }
 
         let vertex_buffer = this.device.createBuffer({
@@ -200,10 +200,43 @@ export class App {
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
         })
 
-       
-
         this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
         this.device.queue.writeBuffer(index_buffer, 0, indices);
+
+        let diffuse = this.get_texture(mesh.material.diffuse);
+
+        let bind_group;
+
+        if(mesh.material.opacity){
+            let opacity = this.get_texture(mesh.material.opacity);
+            bind_group = this.device.createBindGroup({
+                layout: this.forward_layout,
+                entries: [
+                    {
+                        binding: 3, //diffuse view
+                        resource: diffuse.view
+                    },
+                    {
+                        binding: 4, //opacity view
+                        resource: opacity.view
+                    }
+                ]
+            });
+        } else {
+            bind_group = this.device.createBindGroup({
+                layout: this.forward_layout,
+                entries: [
+                    {
+                        binding: 3, //diffuse view
+                        resource: diffuse.view
+                    },
+                    {
+                        binding: 4, //unused, for simplicity
+                        resource: diffuse.view
+                    }
+                ]
+            });
+        }
 
         let geo: SceneGeometry = {
             vertices: vertex_buffer,
@@ -212,11 +245,15 @@ export class App {
                 index_type: "uint32"
             },
             vertex_count: indices.length,
-            textures: [this.get_texture(mesh.material.diffuse)]
+            bind_groups: [bind_group]
         }
 
-        this.raster.forward_pass.geometries.push(geo);
-        this.raster.shadow_pass.geometries.push(geo);
+
+        if(mesh.material.opacity){
+            this.raster.forward_diffuse_opacity_pass.geometries.push(geo);
+        } else {
+            this.raster.forward_diffuse_pass.geometries.push(geo);
+        }
     }
 
     update_lights(){
@@ -239,8 +276,6 @@ export class App {
         const forward_shader = this.device.createShaderModule({code: color_shader_src(), label: "color shader"})
         const shadow_shader = this.device.createShaderModule({code: shadow_shader_src(), label: "shadow shader"})
         const skybox_shader = this.device.createShaderModule({code: skybox_shader_src(), label: "skybox shader"})
-
-        const {vertices, indices} = this.scene.encode_ground_vertices();
         
         const skybox_verts = new Float32Array([
             1,3,1,-1,
@@ -262,22 +297,12 @@ export class App {
             label: "shadow pass depth buffer",
         });
 
-        let shadow_sampler = this.device.createSampler({
-            addressModeU: "clamp-to-edge",
-            addressModeV: "clamp-to-edge",
+
+        let tex_sampler = this.device.createSampler({
+            addressModeU: "repeat",
+            addressModeV: "repeat",
             magFilter: "linear",
             minFilter: "linear",
-
-        })
-        
-        const ground_vertex_buffer = this.device.createBuffer({
-            size: vertices.byteLength,
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        });
-
-        const ground_index_buffer = this.device.createBuffer({
-            size: indices.byteLength,
-            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
         })
 
         const light_buffer = this.device.createBuffer({
@@ -295,11 +320,9 @@ export class App {
             usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
         })
     
-        this.device.queue.writeBuffer(ground_vertex_buffer, 0, vertices);
-        this.device.queue.writeBuffer(ground_index_buffer, 0, indices);
         this.device.queue.writeBuffer(skybox_vertex_buffer, 0, skybox_verts);
         
-        const skybox_vertex_buffers: GPUVertexBufferLayout[] = [
+        const skybox_vertex_layout: GPUVertexBufferLayout[] = [
             {
                 attributes: [
                     {
@@ -318,7 +341,7 @@ export class App {
             }
         ]
           
-        const shadow_vertex_buffers: GPUVertexBufferLayout[] = [
+        const shadow_vertex_layout: GPUVertexBufferLayout[] = [
             {
                 attributes: [
                     {
@@ -332,7 +355,7 @@ export class App {
             }
         ]
 
-        const forward_vertex_buffers: GPUVertexBufferLayout[] = [
+        const forward_vertex_layout: GPUVertexBufferLayout[] = [
             {
               attributes: [
                 {
@@ -346,12 +369,12 @@ export class App {
                   format: "float32x3",
                 },
                 {
-                  shaderLocation: 2, // color
+                  shaderLocation: 2, // uv
                   offset: 24,
-                  format: "float32x4",
+                  format: "float32x2",
                 }
               ],
-              arrayStride: 40,
+              arrayStride: 32,
               stepMode: "vertex",
             },
         ];
@@ -361,7 +384,7 @@ export class App {
             label: "skybox bind group layout",
         })
     
-        const forward_bind_group_layout = this.device.createBindGroupLayout({
+        const forward_bind_group_frame_layout = this.device.createBindGroupLayout({
             entries: [
                 {
                     binding: 0, //camera
@@ -384,25 +407,35 @@ export class App {
                         type: "filtering"
                     }
                 },
+            ],
+            label: "forward bind group layout"
+        });
+
+        const forward_bind_group_material_layout = this.device.createBindGroupLayout({
+            entries: [
                 {
-                    binding: 3, //shadow tex
+                    binding: 3, //diffuse tex
                     visibility: GPUShaderStage.FRAGMENT,
                     texture: {
-                        sampleType: "depth",
+                        sampleType: "float",
                         viewDimension: "2d",
                         multisampled: false,
                     }
                 },
                 {
-                    binding: 4, //shadow view
+                    binding: 4, //opacity tex
                     visibility: GPUShaderStage.FRAGMENT,
-                    buffer: {
-                        type: "uniform"
+                    texture: {
+                        sampleType: "float",
+                        viewDimension: "2d",
+                        multisampled: false,
                     }
                 }
             ],
             label: "forward bind group layout"
-        });
+        })
+
+        this.forward_layout = forward_bind_group_material_layout;
 
         const shadow_bind_group_layout = this.device.createBindGroupLayout({
             entries: [
@@ -423,7 +456,7 @@ export class App {
         })
     
         const forward_layout = this.device.createPipelineLayout({
-            bindGroupLayouts: [forward_bind_group_layout],
+            bindGroupLayouts: [forward_bind_group_frame_layout, forward_bind_group_material_layout],
             label: "forward layout"
         });
 
@@ -438,7 +471,7 @@ export class App {
         });
 
         const forward_bind_group = this.device.createBindGroup({
-            layout: forward_bind_group_layout,
+            layout: forward_bind_group_frame_layout,
             entries: [
                 {
                     binding: 0, //camera
@@ -453,19 +486,9 @@ export class App {
                     }
                 },
                 {
-                    binding: 2, //shadows sampler
-                    resource: shadow_sampler
+                    binding: 2, //tex sampler
+                    resource: tex_sampler
                 },
-                {
-                    binding: 3, //shadows tex
-                    resource: shadow_depth_buffer.createView()
-                },
-                {
-                    binding: 4, //shadow view
-                    resource: {
-                        buffer: shadow_view_buffer
-                    }
-                }
             ]
         });
 
@@ -481,11 +504,24 @@ export class App {
             ]
         })
 
+        const blend_mode: GPUBlendState = {
+            alpha: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add"
+            },
+            color: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+                operation: "add"
+            }
+        }
+
         const skybox_pipeline_descriptor: GPURenderPipelineDescriptor = {
             vertex: {
                 module: skybox_shader,
                 entryPoint: "vertex_main",
-                buffers: skybox_vertex_buffers,
+                buffers: skybox_vertex_layout,
             },
             fragment: {
                 module: skybox_shader,
@@ -507,18 +543,22 @@ export class App {
             label: "skybox pipieline descriptor"
         }
 
-        const forward_pipeline_descriptor: GPURenderPipelineDescriptor = {
+        const forward_diffuse_pipeline_descriptor: GPURenderPipelineDescriptor = {
             vertex: {
                 module: forward_shader,
                 entryPoint: "vertex_main",
-                buffers: forward_vertex_buffers,
+                buffers: forward_vertex_layout,
             },
             fragment: {
                 module: forward_shader,
                 entryPoint: "fragment_main",
                 targets: [{
                     format: navigator.gpu.getPreferredCanvasFormat(),
+                    blend: blend_mode
                 }],
+                constants: {
+                    has_opacity: 0
+                }
             },
             primitive: {
                 topology: "triangle-list",
@@ -531,13 +571,43 @@ export class App {
             },
             layout: forward_layout,
             label: "forward pipeline descriptor",
-        };      
+        };   
+
+        const forward_diffuse_opacity_pipeline_descriptor: GPURenderPipelineDescriptor = {
+            vertex: {
+                module: forward_shader,
+                entryPoint: "vertex_main",
+                buffers: forward_vertex_layout,
+            },
+            fragment: {
+                module: forward_shader,
+                entryPoint: "fragment_main",
+                targets: [{
+                    format: navigator.gpu.getPreferredCanvasFormat(),
+                    blend: blend_mode
+                }],
+                constants: {
+                    has_opacity: 1
+                }
+            },
+            primitive: {
+                topology: "triangle-list",
+                cullMode: "back",
+            },
+            depthStencil: {
+                format: "depth32float",
+                depthWriteEnabled: true,
+                depthCompare: "less",
+            },
+            layout: forward_layout,
+            label: "forward pipeline descriptor",
+        };
 
         const shadow_pipeline_descriptor: GPURenderPipelineDescriptor = {
             vertex: {
                 module: shadow_shader,
                 entryPoint: "vertex_main",
-                buffers: shadow_vertex_buffers,
+                buffers: shadow_vertex_layout,
             },
             fragment: {
                 module: shadow_shader,
@@ -546,7 +616,7 @@ export class App {
             },
             primitive: {
                 topology: "triangle-list",
-                cullMode: "none"
+                cullMode: "back"
             },
             depthStencil: {
                 format: "depth32float",
@@ -557,7 +627,8 @@ export class App {
             label: "shadow pipeline descriptor",
         };
     
-        const forward_render_pipeline = this.device.createRenderPipeline(forward_pipeline_descriptor);
+        const forward_diffuse_render_pipeline = this.device.createRenderPipeline(forward_diffuse_pipeline_descriptor);
+        const forward_diffuse_opacity_render_pipeline = this.device.createRenderPipeline(forward_diffuse_opacity_pipeline_descriptor);
         const shadow_render_pipeline = this.device.createRenderPipeline(shadow_pipeline_descriptor);
         const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
 
@@ -585,9 +656,17 @@ export class App {
         }
 
         return { 
-            forward_pass: {
+            forward_diffuse_pass: {
                 shader: forward_shader,
-                pipeline: forward_render_pipeline,
+                pipeline: forward_diffuse_render_pipeline,
+                bind_groups: [forward_bind_group],
+                geometries: [],
+                color_attachments: [forward_color_attachment],
+                depth_attachment: forward_depth_attachment
+            },
+            forward_diffuse_opacity_pass: {
+                shader: forward_shader,
+                pipeline: forward_diffuse_opacity_render_pipeline,
                 bind_groups: [forward_bind_group],
                 geometries: [],
                 color_attachments: [forward_color_attachment],
@@ -608,7 +687,7 @@ export class App {
                 geometries: [{
                     vertices: skybox_vertex_buffer,
                     vertex_count: 3,
-                    textures: []
+                    bind_groups: [],
                 }],
                 color_attachments: [skybox_color_attachmet],
                 depth_attachment: skybox_depth_attachment,
@@ -618,8 +697,6 @@ export class App {
             shadow_depth_buffer: shadow_depth_buffer,
             point_light_buffer: light_buffer,
             shadow_view_buffer: shadow_view_buffer,
-            groud_vertex_buffer: ground_vertex_buffer,
-            groud_index_buffer: ground_index_buffer,
         }
     }
 
@@ -662,6 +739,7 @@ export class App {
             pass.bind_groups.forEach((group, idx)=>pass_encoder.setBindGroup(idx, group));
             pass.geometries.forEach(geom => {
                 pass_encoder.setVertexBuffer(0, geom.vertices);
+                geom.bind_groups.forEach((group, idx)=>pass_encoder.setBindGroup(idx + pass.bind_groups.length, group));
                 if(geom.indices){
                     pass_encoder.setIndexBuffer(geom.indices.indices, geom.indices.index_type);
                     pass_encoder.drawIndexed(geom.vertex_count);
@@ -680,7 +758,7 @@ export class App {
 
         
         // this.encode_render_passes([this.raster.shadow_pass], command_encoder);
-        this.encode_render_passes([this.raster.forward_pass, this.raster.skybox_pass], command_encoder);
+        this.encode_render_passes([this.raster.forward_diffuse_pass, this.raster.forward_diffuse_opacity_pass, this.raster.skybox_pass], command_encoder);
         // this.encode_compute_pass(this.compute.compute_pass, command_encoder);
         // command_encoder.copyBufferToBuffer(this.compute.data_buffer, 0, this.compute.read_buffer, 0, this.compute.data_buffer.size);
 

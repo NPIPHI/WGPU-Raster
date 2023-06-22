@@ -2,7 +2,6 @@ import { mat4, vec3 } from "gl-matrix";
 import { App } from "./App";
 import { Camera } from "./camera";
 import { SpotLight } from "./scene";
-import { OBJ } from "webgl-obj-loader"
 import { load_json_model } from "./ModelLoad";
 
 async function main(){

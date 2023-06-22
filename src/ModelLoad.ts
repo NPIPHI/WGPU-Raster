@@ -6,7 +6,8 @@ type RawMesh = {
 }
 
 type RawMaterial = {
-    diffuse: string | null;
+    diffuse?: string;
+    opacity?: string;
 }
 
 type RawModel = {
@@ -31,20 +32,30 @@ export type Texture = {
 
 export type Material = {
     diffuse: Texture
+    opacity?: Texture
 }
 
 async function load_material(mat: RawMaterial, parent_path: string): Promise<Material> {
+    let diffuse;
+    let opacity;
     if(mat.diffuse){
-        let split = mat.diffuse.split('.')
-        if(split[split.length-1] == "png"){
-            let tex = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
-            return { diffuse: tex };
-        } else {
-            return blank_material();
+        try {
+            diffuse = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
+        } catch(e){
+            diffuse = await blank_texture();
+            console.log(`Error loading ${mat.diffuse}`);
         }
     } else {
-        return blank_material();
+        diffuse = await blank_texture();
     }
+    if(mat.opacity){
+        try {
+            opacity = await load_texture("StgDolpic_Chikei/" + mat.opacity);
+        } catch(e){
+            console.log(`Error loading ${mat.opacity}`);
+        }
+    }
+    return {diffuse, opacity};
 }
 
 async function load_texture(path: string): Promise<Texture> {
@@ -57,14 +68,12 @@ async function load_texture(path: string): Promise<Texture> {
     }
 }
 
-function blank_material(): Material {
-    return {
-        diffuse: {
-            width: 1,
-            height: 1,
-            data: null,
-        }
-    }
+async function unsuported_texture(): Promise<Texture> {
+    return await load_texture("unsuported.png");
+}
+
+async function blank_texture(): Promise<Texture> {
+    return await load_texture("missing.png");
 }
 
 export async function load_json_model(path: string): Promise<Mesh[]> {

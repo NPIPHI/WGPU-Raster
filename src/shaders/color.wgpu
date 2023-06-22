@@ -5,21 +5,20 @@ var<uniform> camera: mat4x4f;
 var<storage, read> lights: LightBuffer;
 
 @group(0) @binding(2)
-var shadow_sampler: sampler; 
+var tex_sampler: sampler; 
 
-@group(0) @binding(3)
-var shadow_texture: texture_depth_2d;
+@group(1) @binding(3)
+var diffuse_texture : texture_2d<f32>;
 
-@group(0) @binding(4)
-var<uniform> shadow_view: mat4x4f;
+@group(1) @binding(4)
+var opacity_texture : texture_2d<f32>;
+
+override has_opacity: bool;
 
 struct VertexOut {
   @builtin(position) position : vec4f,
   @location(0) normal : vec3f,
-  @location(1) world_pos: vec3f,
-  @location(2) color : vec3f,
-  @location(3) luminance: f32,
-  @location(4) uv : vec2f,
+  @location(1) uv : vec2f,
 }
 
 struct Light {
@@ -56,22 +55,28 @@ struct LightBuffer {
 @vertex
 fn vertex_main(@location(0) position: vec3f,
                @location(1) normal: vec3f,
-               @location(2) color: vec4f) -> VertexOut
+               @location(2) uv: vec2f) -> VertexOut
 {
   var output : VertexOut;
   output.position = (camera * vec4f(position, 1));
-  output.world_pos = position;
   output.normal = normal;
-  output.color = color.xyz;
-  output.luminance = color.w;
-  output.uv = (output.position.xy / output.position.w) * vec2f(0.5, -0.5) + 0.5;
+  output.uv = vec2(uv.x, 1-uv.y);
   return output;
 }
 
 @fragment
 fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
 {
-  return vec4f(fragData.color, 1);
+  let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);
+  var opacity = 1.0; 
+  if(has_opacity){
+    opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;
+  }
+
+  let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;
+  let ambient_light = 0.5;
+  let lighted_color = color * (directional_light + ambient_light);
+  return vec4(lighted_color.xyz,opacity);
   /*
   var color: vec3f = vec3f(0,0,0);
   let directional = dot(fragData.normal, vec3f(0, 1, 0));
