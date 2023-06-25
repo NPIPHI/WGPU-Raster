@@ -1,0 +1,86 @@
+@group(0) @binding(0)
+var tex_sampler: sampler;
+
+@group(0) @binding(1)
+var color_tex: texture_2d<f32>;
+
+@group(0) @binding(2)
+var position_tex: texture_2d<f32>;
+
+@group(0) @binding(3)
+var normal_tex: texture_2d<f32>;
+
+struct VertexOut {
+  @builtin(position) position : vec4f,
+  @location(0) uv: vec2f,
+}
+
+const PI = 3.1415926;
+
+@vertex
+fn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut
+{
+  var output : VertexOut;
+  output.position = vec4f(position, 1,1);
+  output.uv = uv;
+  return output;
+}
+
+fn average_kernal(start: vec2u, size: vec2u) -> vec4f {
+    var sum = vec4f();
+    for(var x: u32 = 0; x < size.x; x++){
+        for(var y: u32 = 0; y < size.y; y++){
+            sum += textureLoad(color_tex, start + vec2u(x,y), 0);
+        }
+    }
+    return sum / f32(size.x * size.y);
+}
+
+fn gauss(x: i32, y: i32, a: f32) -> f32{
+    return exp(-f32(x*x+y*y)/(2.0 * a*a));
+}
+
+fn gauss_kernal(start: vec2u, radius: u32, a: f32) -> vec4f {
+    var sum = vec4f();
+    var coeff_sum = 0.0;
+    let r = i32(radius);
+    let start_depth = textureLoad(position_tex, start, 0).w;
+    for(var x: i32 = -r + 1; x < r; x++){
+        for(var y: i32 = -r + 1; y < r; y++){
+            let g = gauss(x,y,a);
+            let depth = textureLoad(position_tex, vec2i(start) + vec2i(x,y), 0).w;
+            if(depth + 1 > start_depth){
+                sum += g * textureLoad(color_tex, vec2i(start) + vec2i(x,y), 0);
+                coeff_sum += g;
+            }
+        }
+    }
+    return sum / coeff_sum;
+}
+
+fn luminance(color: vec4f) -> f32{
+    return color.x + color.y + color.z;
+}
+
+override kernalx: u32 = 4;
+override kernaly: u32 = 4;
+
+@fragment
+fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
+{
+    let dim = textureDimensions(color_tex);
+    let iuv = vec2u(fragData.uv * vec2f(dim));
+    let pos = textureLoad(position_tex, iuv, 0);
+    let norm = textureLoad(normal_tex, iuv, 0);
+    let ambient = 0.5;
+    let directional = max(dot(norm.xyz, vec3(0, 0.3, 0.9)), 0);
+    let light = ambient + directional * 0.5;
+    let depth = pos.w;
+    var color = vec3f();
+    if(depth > 200){
+        color = gauss_kernal(iuv, kernalx, depth/300).xyz;
+    } else {
+        color = textureLoad(color_tex, iuv, 0).xyz;
+    }
+    return vec4(color.xyz * light, 1.0);
+}

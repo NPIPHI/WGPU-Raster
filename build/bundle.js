@@ -2087,17 +2087,17 @@
     }
   };
 
+  // src/shaders/postprocess.wgpu
+  var postprocess_default = "@group(0) @binding(0)\r\nvar tex_sampler: sampler;\r\n\r\n@group(0) @binding(1)\r\nvar color_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(2)\r\nvar position_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(3)\r\nvar normal_tex: texture_2d<f32>;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\nconst PI = 3.1415926;\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\nfn average_kernal(start: vec2u, size: vec2u) -> vec4f {\r\n    var sum = vec4f();\r\n    for(var x: u32 = 0; x < size.x; x++){\r\n        for(var y: u32 = 0; y < size.y; y++){\r\n            sum += textureLoad(color_tex, start + vec2u(x,y), 0);\r\n        }\r\n    }\r\n    return sum / f32(size.x * size.y);\r\n}\r\n\r\nfn gauss(x: i32, y: i32, a: f32) -> f32{\r\n    return exp(-f32(x*x+y*y)/(2.0 * a*a));\r\n}\r\n\r\nfn gauss_kernal(start: vec2u, radius: u32, a: f32) -> vec4f {\r\n    var sum = vec4f();\r\n    var coeff_sum = 0.0;\r\n    let r = i32(radius);\r\n    let start_depth = textureLoad(position_tex, start, 0).w;\r\n    for(var x: i32 = -r + 1; x < r; x++){\r\n        for(var y: i32 = -r + 1; y < r; y++){\r\n            let g = gauss(x,y,a);\r\n            let depth = textureLoad(position_tex, vec2i(start) + vec2i(x,y), 0).w;\r\n            if(depth + 1 > start_depth){\r\n                sum += g * textureLoad(color_tex, vec2i(start) + vec2i(x,y), 0);\r\n                coeff_sum += g;\r\n            }\r\n        }\r\n    }\r\n    return sum / coeff_sum;\r\n}\r\n\r\nfn luminance(color: vec4f) -> f32{\r\n    return color.x + color.y + color.z;\r\n}\r\n\r\noverride kernalx: u32 = 4;\r\noverride kernaly: u32 = 4;\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    let dim = textureDimensions(color_tex);\r\n    let iuv = vec2u(fragData.uv * vec2f(dim));\r\n    let pos = textureLoad(position_tex, iuv, 0);\r\n    let norm = textureLoad(normal_tex, iuv, 0);\r\n    let ambient = 0.5;\r\n    let directional = max(dot(norm.xyz, vec3(0, 0.3, 0.9)), 0);\r\n    let light = ambient + directional * 0.5;\r\n    let depth = pos.w;\r\n    var color = vec3f();\r\n    if(depth > 200){\r\n        color = gauss_kernal(iuv, kernalx, depth/300).xyz;\r\n    } else {\r\n        color = textureLoad(color_tex, iuv, 0).xyz;\r\n    }\r\n    return vec4(color.xyz * light, 1.0);\r\n}\r\n";
+
   // src/shaders/compute.wgpu
-  var compute_default = "@group(0) @binding(0)\r\nvar<storage, read_write> output: array<atomic<u32>>;\r\n\r\nvar<workgroup> atomic_inc: atomic<u32>;\r\n\r\n@compute @workgroup_size(64)\r\nfn main(\r\n  @builtin(global_invocation_id)\r\n  global_id : vec3u,\r\n\r\n  @builtin(local_invocation_id)\r\n  local_id : vec3u,\r\n) {\r\n  let i = atomicAdd(&output[0], 1);\r\n  atomicStore(&output[global_id.x + 1], i);\r\n  //output[global_id.x + 1] = i;\r\n}";
+  var compute_default = "@group(0) @binding(0)\r\nvar input_image : texture_2d<f32>;\r\n\r\n@group(0) @binding(1)\r\nvar output_image : texture_storage_2d<rgba8unorm, write>;\r\n\r\noverride dimx: u32;\r\noverride dimy: u32;\r\n\r\nstruct Settings {\r\n  output_size: vec2u,\r\n}\r\n\r\nfn reduce(a: vec4f, b: vec4f) -> vec4f {\r\n  return a+b;\r\n}\r\n\r\n@compute @workgroup_size(dimx, dimy)\r\nfn main(\r\n  @builtin(global_invocation_id)\r\n  global_id : vec3u,\r\n\r\n  @builtin(local_invocation_id)\r\n  local_id : vec3u,\r\n) {\r\n  let dims = textureDimensions(output_image);\r\n  if(local_id.x >= dims.x || local_id.y >= dims.y){\r\n    return;\r\n  }\r\n  var val = vec4f(0,0,0,0);\r\n  for(var x:u32 = 0; x < 2; x++){\r\n    for(var y:u32 = 0; y < 2; y++){\r\n      val = reduce(val, textureLoad(input_image, global_id.xy*2+vec2u(x,y), 0));\r\n    }\r\n  }\r\n  textureStore(output_image, global_id.xy, val/4.0);\r\n}";
 
   // src/shaders/color.wgpu
-  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read> lights: LightBuffer;\r\n\r\n@group(0) @binding(2)\r\nvar tex_sampler: sampler; \r\n\r\n@group(1) @binding(3)\r\nvar diffuse_texture : texture_2d<f32>;\r\n\r\n@group(1) @binding(4)\r\nvar opacity_texture : texture_2d<f32>;\r\n\r\noverride has_opacity: bool;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) uv : vec2f,\r\n}\r\n\r\nstruct Light {\r\n  data1: vec4f,\r\n  data2: vec4f\r\n}\r\n\r\nfn light_pos(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n} \r\n\r\nfn light_dir(l: Light) -> vec3f {\r\n  return l.data1.xyz;\r\n}\r\n\r\nfn light_type(l: Light) -> f32 {\r\n  return l.data1.w;\r\n}\r\n\r\nfn light_luminance(l: Light) -> f32 {\r\n  return l.data2.w;\r\n}\r\n\r\nfn light_color(l: Light) -> vec3f {\r\n  return l.data2.xyz;\r\n}\r\n\r\nstruct LightBuffer {\r\n  count: u32,\r\n  ambient_luminance: f32,\r\n  lights: array<Light>\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.normal = normal;\r\n  output.uv = vec2(uv.x, 1-uv.y);\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n  let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);\r\n  var opacity = 1.0; \r\n  if(has_opacity){\r\n    opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;\r\n  }\r\n\r\n  let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;\r\n  let ambient_light = 0.5;\r\n  let lighted_color = color * (directional_light + ambient_light);\r\n  return vec4(lighted_color.xyz,opacity);\r\n  /*\r\n  var color: vec3f = vec3f(0,0,0);\r\n  let directional = dot(fragData.normal, vec3f(0, 1, 0));\r\n  let ambient = 0.2;\r\n  return vec4f(fragData.color * (directional + ambient), 1);\r\n\r\n\r\n  for(var i: u32 = 0; i < lights.count; i++){\r\n    let light = lights.lights[i];\r\n    if(light_type(light) == 0){\r\n      //point light\r\n      let dir = normalize(fragData.world_pos - light_pos(light));\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    } else {\r\n      //directional light\r\n      let dir = light_dir(light);\r\n      let normal_dot = max(-dot(dir, fragData.normal),0);\r\n      let intensity = normal_dot * light_luminance(light);\r\n      color += light_color(light) * intensity;\r\n    }\r\n  }\r\n  let ambient = lights.ambient_luminance + fragData.luminance;\r\n  color += ambient;\r\n  return vec4f(color * fragData.color, 1);\r\n\r\n\r\n  return vec4f(ambient * fragData.color,1);\r\n\r\n  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));\r\n  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;\r\n  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);\r\n  let frag_depth = shadow_pos.z / shadow_pos.w;\r\n  let diff = frag_depth - shadow_depth;\r\n  if(diff > 0.001){\r\n  }\r\n\r\n  return vec4f(color * fragData.color, 1);\r\n*/\r\n}";
-
-  // src/shaders/shadow.wgpu
-  var shadow_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  return output;\r\n}\r\n\r\n@fragment fn fragment_main(fragData: VertexOut){}\r\n/*\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return vec4f(1,1,1,1);\r\n}\r\n*/\r\n";
+  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar tex_sampler: sampler; \r\n\r\n@group(1) @binding(2)\r\nvar diffuse_texture : texture_2d<f32>;\r\n\r\n@group(1) @binding(3)\r\nvar opacity_texture : texture_2d<f32>;\r\n\r\noverride has_opacity: bool;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) uv : vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.normal = normal;\r\n  output.uv = vec2(uv.x, 1-uv.y);\r\n  return output;\r\n}\r\n\r\nstruct FragmentOut {\r\n  @location(0) color: vec4f,\r\n  @location(1) position: vec4f,\r\n  @location(2) normal: vec4f,\r\n};\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> FragmentOut\r\n{\r\n  let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);\r\n  var opacity = color.w; \r\n  if(has_opacity){\r\n    opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;\r\n  }\r\n  if(opacity < 0.01){\r\n    discard;\r\n  }\r\n\r\n  /*let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;\r\n  let ambient_light = 0.5;\r\n  let lighted_color = color * (directional_light + ambient_light);\r\n*/\r\n  var frag = FragmentOut();\r\n  frag.color = vec4(color.xyz, opacity);\r\n  frag.normal = vec4f(fragData.normal,0.0);\r\n  frag.position = fragData.position;\r\n  return frag;\r\n}";
 
   // src/shaders/skybox.wgpu
-  var skybox_default = "struct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return vec4f(fragData.uv, 0,1);\r\n}\r\n";
+  var skybox_default = "struct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\nstruct FragmentOut {\r\n  @location(0) color: vec4f,\r\n  @location(1) position: vec4f,\r\n  @location(2) normal: vec4f,\r\n};\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> FragmentOut\r\n{\r\n  var frag = FragmentOut();\r\n  frag.color = vec4f(135.0/255.0,206.0/255.0, 235.0/255.0,1);\r\n  frag.position = vec4f(0,0,0,10000);\r\n  return frag;\r\n}\r\n";
 
   // src/ShaderSrc.ts
   function compute_shader_src() {
@@ -2106,17 +2106,232 @@
   function color_shader_src() {
     return color_default;
   }
-  function shadow_shader_src() {
-    return shadow_default;
-  }
   function skybox_shader_src() {
     return skybox_default;
   }
+  function postprocess_shader_src() {
+    return postprocess_default;
+  }
 
-  // src/App.ts
-  var VEC_ALIGN = 16;
+  // src/MergedBuffer.ts
   var FLOAT_SIZE = 4;
   var U32_SIZE = 4;
+  var MergedBufer = class {
+    merged_vertices;
+    merged_indices;
+    vertex_size;
+    index_size;
+    vertex_cap;
+    index_cap;
+    index_starts;
+    vertex_buffer;
+    index_buffer;
+    device;
+    constructor(device, initial_size = 1024) {
+      if (initial_size < 128)
+        initial_size = 128;
+      this.device = device;
+      this.merged_vertices = new Float32Array(initial_size);
+      this.merged_indices = new Uint32Array(initial_size);
+      this.vertex_buffer = this.device.createBuffer({
+        size: FLOAT_SIZE * initial_size,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX
+      });
+      this.index_buffer = this.device.createBuffer({
+        size: FLOAT_SIZE * initial_size,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
+      });
+      this.vertex_size = 0;
+      this.index_size = 0;
+      this.vertex_cap = initial_size;
+      this.index_cap = initial_size;
+    }
+    add_geometry(vertices, indices) {
+      indices = indices.slice();
+      for (let i = 0; i < indices.length; i++) {
+        indices[i] += this.index_size;
+      }
+      let vertex_offset = this.push_vertices(vertices);
+      let index_offset = this.push_indices(indices);
+      return { vertices: { start: vertex_offset, count: vertices.length }, indices: { start: index_offset, count: indices.length } };
+    }
+    rearange(ordered_ranges) {
+      let new_indices = new Uint32Array(this.index_cap);
+      let new_vertices = new Float32Array(this.vertex_cap);
+      let index_ptr = 0;
+      let vertex_ptr = 0;
+      let new_ranges = ordered_ranges.map((range) => {
+        new_indices.set(this.merged_indices.subarray(range.indices.start, range.indices.start + range.indices.count), index_ptr);
+        new_vertices.set(this.merged_vertices.subarray(range.vertices.start, range.vertices.start + range.vertices.count), vertex_ptr);
+        let new_range = { indices: { start: index_ptr, count: range.indices.count }, vertices: { start: vertex_ptr, count: range.vertices.count } };
+        index_ptr += range.indices.count;
+        vertex_ptr += range.vertices.count;
+        for (let i = new_range.indices.start; i < new_range.indices.start + new_range.indices.count; i++) {
+          new_indices[i] += new_range.indices.start - range.indices.start;
+        }
+        return new_range;
+      });
+      this.merged_indices = new_indices;
+      this.merged_vertices = new_vertices;
+      this.device.queue.writeBuffer(this.index_buffer, 0, new_indices);
+      this.device.queue.writeBuffer(this.vertex_buffer, 0, new_vertices);
+      return new_ranges;
+    }
+    new_cap(current_cap, required_size) {
+      return Math.max(current_cap * 2, required_size);
+    }
+    push_indices(indices) {
+      let push_index = this.index_size;
+      if (this.index_size + indices.length > this.index_cap) {
+        this.index_cap = this.new_cap(this.index_cap, this.index_size + indices.length);
+        let new_merged_indices = new Uint32Array(this.index_cap);
+        new_merged_indices.set(this.merged_indices);
+        this.merged_indices = new_merged_indices;
+        this.index_buffer.destroy();
+        this.index_buffer = this.device.createBuffer({
+          size: this.index_cap * U32_SIZE,
+          usage: this.index_buffer.usage
+        });
+        this.device.queue.writeBuffer(this.index_buffer, 0, this.merged_indices);
+      }
+      this.device.queue.writeBuffer(this.index_buffer, this.index_size * U32_SIZE, indices);
+      this.merged_indices.set(indices, this.index_size);
+      this.index_size += indices.length;
+      return push_index;
+    }
+    push_vertices(vertices) {
+      let push_index = this.vertex_size;
+      if (this.vertex_size + vertices.length > this.vertex_cap) {
+        this.vertex_cap = this.new_cap(this.vertex_cap, this.vertex_size + vertices.length);
+        let new_merged_vertices = new Float32Array(this.vertex_cap);
+        new_merged_vertices.set(this.merged_vertices);
+        this.merged_vertices = new_merged_vertices;
+        this.vertex_buffer.destroy();
+        this.vertex_buffer = this.device.createBuffer({
+          size: this.vertex_cap * FLOAT_SIZE,
+          usage: this.vertex_buffer.usage
+        });
+        this.device.queue.writeBuffer(this.vertex_buffer, 0, this.merged_vertices);
+      }
+      this.device.queue.writeBuffer(this.vertex_buffer, this.vertex_size * FLOAT_SIZE, vertices);
+      this.merged_vertices.set(vertices, this.vertex_size);
+      this.vertex_size += vertices.length;
+      return push_index;
+    }
+  };
+
+  // src/BindGroupCache.ts
+  var BindGroupCache = class {
+    device;
+    cache;
+    cache_size;
+    constructor(device) {
+      this.device = device;
+      this.cache = /* @__PURE__ */ new Map();
+      this.cache_size = 0;
+    }
+    key_equal(a, b) {
+      if (a.length != b.length)
+        return false;
+      a.sort((x, y) => x.binding - y.binding);
+      b.sort((x, y) => x.binding - y.binding);
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].binding != b[i].binding)
+          return false;
+        if (a[i].resource != b[i].resource)
+          return false;
+      }
+      return true;
+    }
+    createBindGroup(descriptor) {
+      let bucket = this.cache.get(descriptor.layout);
+      if (bucket) {
+        let entry = bucket.bind_groups.find((v) => this.key_equal(v.key, descriptor.entries));
+        if (entry) {
+          return entry.value;
+        }
+      } else {
+        this.cache.set(descriptor.layout, { bind_groups: [] });
+      }
+      let bind_group = this.device.createBindGroup(descriptor);
+      bind_group.label = "" + this.cache_size;
+      this.cache_size++;
+      this.cache.get(descriptor.layout).bind_groups.push({ key: descriptor.entries, value: bind_group });
+      return bind_group;
+    }
+  };
+
+  // src/MipMapper.ts
+  var MipMaper = class {
+    device;
+    shader;
+    pipeline;
+    bind_layout;
+    wg_dimension = [16, 16];
+    constructor(device) {
+      this.device = device;
+      this.shader = this.device.createShaderModule({ code: compute_shader_src(), label: "compute shader" });
+      this.pipeline = this.device.createComputePipeline({
+        layout: "auto",
+        compute: {
+          module: this.shader,
+          entryPoint: "main",
+          constants: {
+            dimx: this.wg_dimension[0],
+            dimy: this.wg_dimension[1]
+          }
+        }
+      });
+      this.bind_layout = this.pipeline.getBindGroupLayout(0);
+    }
+    isPow2(v) {
+      return v && !(v & v - 1);
+    }
+    mip_level_count(width, height) {
+      if (!this.isPow2(width) || !this.isPow2(height) || width < 2 || height < 2) {
+        return 1;
+      }
+      return Math.floor(Math.min(Math.log2(width), Math.log2(height)));
+    }
+    generate_mip_maps(tex) {
+      if (!this.isPow2(tex.width) || !this.isPow2(tex.height) || tex.width < 2 || tex.height < 2) {
+        return tex;
+      }
+      for (let i = 0; i < tex.mipLevelCount - 1; i++) {
+        let src_level = tex.createView({
+          baseMipLevel: i,
+          mipLevelCount: 1
+        });
+        let dst_level = tex.createView({
+          baseMipLevel: i + 1,
+          mipLevelCount: 1
+        });
+        let binding = this.device.createBindGroup({
+          layout: this.bind_layout,
+          entries: [
+            {
+              binding: 0,
+              resource: src_level
+            },
+            {
+              binding: 1,
+              resource: dst_level
+            }
+          ]
+        });
+        let command_encoder = this.device.createCommandEncoder();
+        let compute_pass = command_encoder.beginComputePass();
+        compute_pass.setPipeline(this.pipeline);
+        compute_pass.setBindGroup(0, binding);
+        compute_pass.dispatchWorkgroups(Math.ceil(tex.width / (2 << i) / this.wg_dimension[0]), Math.ceil(tex.height / (2 << i) / this.wg_dimension[1]));
+        compute_pass.end();
+        this.device.queue.submit([command_encoder.finish()]);
+      }
+    }
+  };
+
+  // src/App.ts
+  var FLOAT_SIZE2 = 4;
   var App = class {
     constructor(device, context, res_x, res_y) {
       this.device = device;
@@ -2124,74 +2339,33 @@
       this.res_x = res_x;
       this.res_y = res_y;
       this.scene = new Scene();
-      this.shadow_res_x = 2048;
-      this.shadow_res_y = 2048;
+      this.bind_group_cache = new BindGroupCache(device);
       this.camera = this.make_camera();
       this.raster = this.setup_raster();
-      this.compute = this.setup_compute();
-      this.update_lights();
+      this.mipmapper = new MipMaper(this.device);
+      ;
     }
     camera;
     scene;
     raster;
-    compute;
-    shadow_res_x;
-    shadow_res_y;
+    mipmapper;
     clear_color = { r: 0, g: 0.5, b: 1, a: 1 };
     texture_cache = /* @__PURE__ */ new Map();
     forward_layout;
-    setup_compute() {
-      let buffer_size = (1 + (1 << 10)) * U32_SIZE;
-      const shader = this.device.createShaderModule({ code: compute_shader_src(), label: "compute shader" });
-      const output_buffer = this.device.createBuffer({
-        size: buffer_size,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.VERTEX
-      });
-      const read_buffer = this.device.createBuffer({
-        size: buffer_size,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-      });
-      const pipeline = this.device.createComputePipeline({
-        layout: "auto",
-        compute: {
-          module: shader,
-          entryPoint: "main"
-        }
-      });
-      const bind_group_layout = pipeline.getBindGroupLayout(0);
-      const bind_group = this.device.createBindGroup({
-        layout: bind_group_layout,
-        entries: [
-          {
-            binding: 0,
-            resource: {
-              buffer: output_buffer
-            }
-          }
-        ]
-      });
-      return {
-        compute_pass: {
-          shader,
-          pipeline,
-          bind_groups: [bind_group],
-          dispatch_size: [Math.floor(buffer_size / U32_SIZE / 64)]
-        },
-        data_buffer: output_buffer,
-        read_buffer
-      };
-    }
+    bind_group_cache;
     get_texture(texture) {
       if (!this.texture_cache.get(texture.data)) {
         let tex = this.device.createTexture({
           size: [texture.width, texture.height],
           format: "rgba8unorm",
-          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.STORAGE_BINDING,
+          mipLevelCount: this.mipmapper.mip_level_count(texture.width, texture.height)
         });
-        let view = tex.createView();
         if (texture.data) {
           this.device.queue.copyExternalImageToTexture({ source: texture.data }, { texture: tex }, { width: texture.width, height: texture.height });
         }
+        this.mipmapper.generate_mip_maps(tex);
+        let view = tex.createView();
         this.texture_cache.set(texture.data, { tex, view });
       }
       return this.texture_cache.get(texture.data);
@@ -2200,7 +2374,7 @@
       let mat = mat4_exports.create();
       mat4_exports.identity(mat);
       const buffer = this.device.createBuffer({
-        size: mat.length * FLOAT_SIZE,
+        size: mat.length * FLOAT_SIZE2,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM
       });
       this.device.queue.writeBuffer(buffer, 0, new Float32Array(mat));
@@ -2210,103 +2384,74 @@
       this.camera.mat = mat;
       this.device.queue.writeBuffer(this.camera.buffer, 0, new Float32Array(mat));
     }
-    set_shadow(mat) {
-      this.device.queue.writeBuffer(this.raster.shadow_view_buffer, 0, new Float32Array(mat));
-    }
     add_mesh(mesh) {
       let vertices = new Float32Array(mesh.vertices.length / 3 * 8);
       let indices = new Uint32Array(mesh.indices);
       for (let i = 0; i < mesh.vertices.length / 3; i++) {
-        vertices[i * 8 + 0] = mesh.vertices[i * 3 + 0];
-        vertices[i * 8 + 1] = mesh.vertices[i * 3 + 1];
-        vertices[i * 8 + 2] = mesh.vertices[i * 3 + 2];
+        vertices[i * 8 + 0] = mesh.vertices[i * 3 + 0] / 50;
+        vertices[i * 8 + 1] = mesh.vertices[i * 3 + 2] / 50;
+        vertices[i * 8 + 2] = mesh.vertices[i * 3 + 1] / 50;
         vertices[i * 8 + 3] = mesh.normals[i * 3 + 0];
         vertices[i * 8 + 4] = mesh.normals[i * 3 + 1];
         vertices[i * 8 + 5] = mesh.normals[i * 3 + 2];
         vertices[i * 8 + 6] = mesh.uvs[i * 2 + 0];
         vertices[i * 8 + 7] = mesh.uvs[i * 2 + 1];
       }
-      let vertex_buffer = this.device.createBuffer({
-        size: vertices.byteLength,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX
-      });
-      let index_buffer = this.device.createBuffer({
-        size: indices.byteLength,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
-      });
-      this.device.queue.writeBuffer(vertex_buffer, 0, vertices);
-      this.device.queue.writeBuffer(index_buffer, 0, indices);
       let diffuse = this.get_texture(mesh.material.diffuse);
       let bind_group;
+      let opacity = mesh.material.opacity ? this.get_texture(mesh.material.opacity) : diffuse;
+      bind_group = this.bind_group_cache.createBindGroup({
+        layout: this.forward_layout,
+        entries: [
+          {
+            binding: 2,
+            //diffuse view
+            resource: diffuse.view
+          },
+          {
+            binding: 3,
+            //opacity view
+            resource: opacity.view
+          }
+        ]
+      });
       if (mesh.material.opacity) {
-        let opacity = this.get_texture(mesh.material.opacity);
-        bind_group = this.device.createBindGroup({
-          layout: this.forward_layout,
-          entries: [
-            {
-              binding: 3,
-              //diffuse view
-              resource: diffuse.view
-            },
-            {
-              binding: 4,
-              //opacity view
-              resource: opacity.view
-            }
-          ]
-        });
-      } else {
-        bind_group = this.device.createBindGroup({
-          layout: this.forward_layout,
-          entries: [
-            {
-              binding: 3,
-              //diffuse view
-              resource: diffuse.view
-            },
-            {
-              binding: 4,
-              //unused, for simplicity
-              resource: diffuse.view
-            }
-          ]
-        });
-      }
-      let geo = {
-        vertices: vertex_buffer,
-        indices: {
-          indices: index_buffer,
-          index_type: "uint32"
-        },
-        vertex_count: indices.length,
-        bind_groups: [bind_group]
-      };
-      if (mesh.material.opacity) {
+        let range = this.raster.forward_diffuse_opacity_pass.geometry_buffer.add_geometry(vertices, indices);
+        let geo = {
+          range,
+          bind_groups: [bind_group]
+        };
         this.raster.forward_diffuse_opacity_pass.geometries.push(geo);
       } else {
+        let range = this.raster.forward_diffuse_pass.geometry_buffer.add_geometry(vertices, indices);
+        let geo = {
+          range,
+          bind_groups: [bind_group]
+        };
         this.raster.forward_diffuse_pass.geometries.push(geo);
       }
     }
-    update_lights() {
-      this.set_shadow(this.scene.shadow_perspectives());
-      const lights = this.scene.encode_lights();
-      const needed_size = lights.byteLength + VEC_ALIGN;
-      if (this.raster.point_light_buffer.size < needed_size) {
-        this.raster.point_light_buffer.destroy();
-        this.raster.point_light_buffer = this.device.createBuffer({
-          size: needed_size,
-          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        });
+    optimize_buffers() {
+      this.optimize_pass_buffers(this.raster.forward_diffuse_opacity_pass);
+      this.optimize_pass_buffers(this.raster.forward_diffuse_pass);
+    }
+    sort_materials(pass) {
+      pass.geometries.sort((a, b) => a.bind_groups[0].label.localeCompare(b.bind_groups[0].label));
+    }
+    optimize_pass_buffers(pass) {
+      this.sort_materials(pass);
+      let ranges = pass.geometries.map((g) => g.range);
+      let new_ranges = pass.geometry_buffer.rearange(ranges);
+      for (let i = 0; i < new_ranges.length; i++) {
+        pass.geometries[i].range = new_ranges[i];
       }
-      this.device.queue.writeBuffer(this.raster.point_light_buffer, 0, new Uint32Array([this.scene.light_count()]));
-      this.device.queue.writeBuffer(this.raster.point_light_buffer, U32_SIZE, new Float32Array([this.scene.ambient_luminance()]));
-      this.device.queue.writeBuffer(this.raster.point_light_buffer, VEC_ALIGN, lights, 0, lights.length);
+      pass.optimized_geometries = this.merge_geometries(pass.geometries);
     }
     setup_raster() {
       const forward_shader = this.device.createShaderModule({ code: color_shader_src(), label: "color shader" });
-      const shadow_shader = this.device.createShaderModule({ code: shadow_shader_src(), label: "shadow shader" });
+      const postprocess_shader = this.device.createShaderModule({ code: postprocess_shader_src(), label: "postprocess shader" });
       const skybox_shader = this.device.createShaderModule({ code: skybox_shader_src(), label: "skybox shader" });
-      const skybox_verts = new Float32Array([
+      const full_screen_verts = new Float32Array([
         1,
         3,
         1,
@@ -2320,39 +2465,48 @@
         1,
         1
       ]);
+      const fullscreen_indices = new Uint32Array([
+        0,
+        1,
+        2
+      ]);
+      let gbuffer_dimensions = [this.context.canvas.width, this.context.canvas.height];
       let depth_buffer = this.device.createTexture({
-        size: [this.context.canvas.width, this.context.canvas.height],
+        size: gbuffer_dimensions,
         format: "depth32float",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
         label: "depth buffer"
       });
-      let shadow_depth_buffer = this.device.createTexture({
-        size: [this.shadow_res_x, this.shadow_res_y],
-        format: "depth32float",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-        label: "shadow pass depth buffer"
+      const gbuffer_color = this.device.createTexture({
+        size: gbuffer_dimensions,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        format: navigator.gpu.getPreferredCanvasFormat(),
+        label: "gbuffer color"
       });
-      let tex_sampler = this.device.createSampler({
+      console.log("Canvas format ", navigator.gpu.getPreferredCanvasFormat());
+      const gbuffer_position = this.device.createTexture({
+        size: gbuffer_dimensions,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        format: "rgba32float",
+        label: "gbuffer position"
+      });
+      const gbuffer_normal = this.device.createTexture({
+        size: gbuffer_dimensions,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+        format: "rgba16float",
+        label: "gbuffer normal"
+      });
+      let filtering_tex_sampler = this.device.createSampler({
         addressModeU: "repeat",
         addressModeV: "repeat",
         magFilter: "linear",
         minFilter: "linear"
       });
-      const light_buffer = this.device.createBuffer({
-        size: 64,
-        //starting size
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      let nearest_tex_sampler = this.device.createSampler({
+        magFilter: "nearest",
+        minFilter: "nearest"
       });
-      const shadow_view_buffer = this.device.createBuffer({
-        size: 16 * FLOAT_SIZE,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-      });
-      const skybox_vertex_buffer = this.device.createBuffer({
-        size: skybox_verts.byteLength,
-        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
-      });
-      this.device.queue.writeBuffer(skybox_vertex_buffer, 0, skybox_verts);
-      const skybox_vertex_layout = [
+      const uv_2d_vertex_layout = [
         {
           attributes: [
             {
@@ -2363,25 +2517,11 @@
             },
             {
               shaderLocation: 1,
-              offset: 2 * FLOAT_SIZE,
+              offset: 2 * FLOAT_SIZE2,
               format: "float32x2"
             }
           ],
-          arrayStride: 4 * FLOAT_SIZE,
-          stepMode: "vertex"
-        }
-      ];
-      const shadow_vertex_layout = [
-        {
-          attributes: [
-            {
-              shaderLocation: 0,
-              // position
-              offset: 0,
-              format: "float32x3"
-            }
-          ],
-          arrayStride: 40,
+          arrayStride: 4 * FLOAT_SIZE2,
           stepMode: "vertex"
         }
       ];
@@ -2415,6 +2555,42 @@
         entries: [],
         label: "skybox bind group layout"
       });
+      const postprocess_bind_group_layout = this.device.createBindGroupLayout({
+        entries: [
+          {
+            binding: 0,
+            visibility: GPUShaderStage.FRAGMENT,
+            sampler: {
+              type: "filtering"
+            }
+          },
+          {
+            binding: 1,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: {
+              sampleType: "float",
+              viewDimension: "2d"
+            }
+          },
+          {
+            binding: 2,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: {
+              sampleType: "unfilterable-float",
+              viewDimension: "2d"
+            }
+          },
+          {
+            binding: 3,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: {
+              sampleType: "unfilterable-float",
+              viewDimension: "2d"
+            }
+          }
+        ],
+        label: "postprocess bind group layout"
+      });
       const forward_bind_group_frame_layout = this.device.createBindGroupLayout({
         entries: [
           {
@@ -2427,14 +2603,7 @@
           },
           {
             binding: 1,
-            //lights
-            visibility: GPUShaderStage.FRAGMENT,
-            buffer: {
-              type: "read-only-storage"
-            }
-          },
-          {
-            binding: 2,
+            //sampler
             visibility: GPUShaderStage.FRAGMENT,
             sampler: {
               type: "filtering"
@@ -2446,7 +2615,7 @@
       const forward_bind_group_material_layout = this.device.createBindGroupLayout({
         entries: [
           {
-            binding: 3,
+            binding: 2,
             //diffuse tex
             visibility: GPUShaderStage.FRAGMENT,
             texture: {
@@ -2456,7 +2625,7 @@
             }
           },
           {
-            binding: 4,
+            binding: 3,
             //opacity tex
             visibility: GPUShaderStage.FRAGMENT,
             texture: {
@@ -2466,21 +2635,12 @@
             }
           }
         ],
-        label: "forward bind group layout"
+        label: "forward bind group material layout"
       });
       this.forward_layout = forward_bind_group_material_layout;
-      const shadow_bind_group_layout = this.device.createBindGroupLayout({
-        entries: [
-          {
-            binding: 0,
-            //camera
-            visibility: GPUShaderStage.VERTEX,
-            buffer: {
-              type: "uniform"
-            }
-          }
-        ],
-        label: "shadow bind group layout"
+      const postprocess_layout = this.device.createPipelineLayout({
+        bindGroupLayouts: [postprocess_bind_group_layout],
+        label: "postprocess layout"
       });
       const skybox_layout = this.device.createPipelineLayout({
         bindGroupLayouts: [skybox_bind_group_layout],
@@ -2490,15 +2650,11 @@
         bindGroupLayouts: [forward_bind_group_frame_layout, forward_bind_group_material_layout],
         label: "forward layout"
       });
-      const shadow_layout = this.device.createPipelineLayout({
-        bindGroupLayouts: [shadow_bind_group_layout],
-        label: "shadow layout"
-      });
-      const skybox_bind_group = this.device.createBindGroup({
+      const skybox_bind_group = this.bind_group_cache.createBindGroup({
         layout: skybox_bind_group_layout,
         entries: []
       });
-      const forward_bind_group = this.device.createBindGroup({
+      const forward_bind_group = this.bind_group_cache.createBindGroup({
         layout: forward_bind_group_frame_layout,
         entries: [
           {
@@ -2510,27 +2666,29 @@
           },
           {
             binding: 1,
-            //lights
-            resource: {
-              buffer: light_buffer
-            }
-          },
-          {
-            binding: 2,
             //tex sampler
-            resource: tex_sampler
+            resource: filtering_tex_sampler
           }
         ]
       });
-      const shadow_bind_group = this.device.createBindGroup({
-        layout: shadow_bind_group_layout,
+      const postprocess_bind_group = this.bind_group_cache.createBindGroup({
+        layout: postprocess_bind_group_layout,
         entries: [
           {
             binding: 0,
-            //camera
-            resource: {
-              buffer: shadow_view_buffer
-            }
+            resource: nearest_tex_sampler
+          },
+          {
+            binding: 1,
+            resource: gbuffer_color.createView()
+          },
+          {
+            binding: 2,
+            resource: gbuffer_position.createView()
+          },
+          {
+            binding: 3,
+            resource: gbuffer_normal.createView()
           }
         ]
       });
@@ -2546,18 +2704,42 @@
           operation: "add"
         }
       };
+      const pass1_targets = [
+        { format: navigator.gpu.getPreferredCanvasFormat(), blend: blend_mode },
+        { format: gbuffer_position.format },
+        { format: gbuffer_normal.format }
+      ];
+      const canvas_target = [
+        { format: navigator.gpu.getPreferredCanvasFormat() }
+      ];
+      const postprocess_pipeline_descriptor = {
+        vertex: {
+          module: postprocess_shader,
+          entryPoint: "vertex_main",
+          buffers: uv_2d_vertex_layout
+        },
+        fragment: {
+          module: postprocess_shader,
+          entryPoint: "fragment_main",
+          targets: canvas_target
+        },
+        primitive: {
+          topology: "triangle-list",
+          cullMode: "none"
+        },
+        layout: postprocess_layout,
+        label: "postprocess pipeline descriptor"
+      };
       const skybox_pipeline_descriptor = {
         vertex: {
           module: skybox_shader,
           entryPoint: "vertex_main",
-          buffers: skybox_vertex_layout
+          buffers: uv_2d_vertex_layout
         },
         fragment: {
           module: skybox_shader,
           entryPoint: "fragment_main",
-          targets: [{
-            format: navigator.gpu.getPreferredCanvasFormat()
-          }]
+          targets: pass1_targets
         },
         primitive: {
           topology: "triangle-list",
@@ -2580,10 +2762,7 @@
         fragment: {
           module: forward_shader,
           entryPoint: "fragment_main",
-          targets: [{
-            format: navigator.gpu.getPreferredCanvasFormat(),
-            blend: blend_mode
-          }],
+          targets: pass1_targets,
           constants: {
             has_opacity: 0
           }
@@ -2609,10 +2788,7 @@
         fragment: {
           module: forward_shader,
           entryPoint: "fragment_main",
-          targets: [{
-            format: navigator.gpu.getPreferredCanvasFormat(),
-            blend: blend_mode
-          }],
+          targets: pass1_targets,
           constants: {
             has_opacity: 1
           }
@@ -2629,99 +2805,89 @@
         layout: forward_layout,
         label: "forward pipeline descriptor"
       };
-      const shadow_pipeline_descriptor = {
-        vertex: {
-          module: shadow_shader,
-          entryPoint: "vertex_main",
-          buffers: shadow_vertex_layout
-        },
-        fragment: {
-          module: shadow_shader,
-          entryPoint: "fragment_main",
-          targets: []
-        },
-        primitive: {
-          topology: "triangle-list",
-          cullMode: "back"
-        },
-        depthStencil: {
-          format: "depth32float",
-          depthWriteEnabled: true,
-          depthCompare: "less"
-        },
-        layout: shadow_layout,
-        label: "shadow pipeline descriptor"
-      };
+      const postprocess_render_pipeline = this.device.createRenderPipeline(postprocess_pipeline_descriptor);
       const forward_diffuse_render_pipeline = this.device.createRenderPipeline(forward_diffuse_pipeline_descriptor);
       const forward_diffuse_opacity_render_pipeline = this.device.createRenderPipeline(forward_diffuse_opacity_pipeline_descriptor);
-      const shadow_render_pipeline = this.device.createRenderPipeline(shadow_pipeline_descriptor);
       const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
-      const forward_color_attachment = "canvas";
+      const forward_color_attachment = {
+        view: gbuffer_color.createView(),
+        loadOp: "clear",
+        storeOp: "store"
+      };
+      const forward_position_attachment = {
+        view: gbuffer_position.createView(),
+        loadOp: "clear",
+        storeOp: "store"
+      };
+      const forward_normal_attachment = {
+        view: gbuffer_normal.createView(),
+        loadOp: "clear",
+        storeOp: "store"
+      };
+      const forward_attachments = [forward_color_attachment, forward_position_attachment, forward_normal_attachment];
       const forward_depth_attachment = {
         view: depth_buffer.createView(),
         depthClearValue: 1,
         depthLoadOp: "clear",
         depthStoreOp: "discard"
       };
-      const skybox_color_attachmet = "canvas";
-      const skybox_depth_attachment = {
-        view: depth_buffer.createView(),
-        depthClearValue: 1,
-        depthLoadOp: "clear",
-        depthStoreOp: "discard"
-      };
-      const shadow_color_attachments = [];
-      const shadow_depth_attachment = {
-        view: shadow_depth_buffer.createView(),
-        depthClearValue: 1,
-        depthLoadOp: "clear",
-        depthStoreOp: "store"
-      };
+      const postprocess_color_attachmet = "canvas";
+      let fullscreen_buffer = new MergedBufer(this.device);
+      let fullscreen_range = fullscreen_buffer.add_geometry(full_screen_verts, fullscreen_indices);
       return {
         forward_diffuse_pass: {
           shader: forward_shader,
           pipeline: forward_diffuse_render_pipeline,
           bind_groups: [forward_bind_group],
+          geometry_buffer: new MergedBufer(this.device),
+          vertex_size: forward_vertex_layout[0].arrayStride,
           geometries: [],
-          color_attachments: [forward_color_attachment],
+          color_attachments: forward_attachments,
           depth_attachment: forward_depth_attachment
         },
         forward_diffuse_opacity_pass: {
           shader: forward_shader,
           pipeline: forward_diffuse_opacity_render_pipeline,
           bind_groups: [forward_bind_group],
+          geometry_buffer: new MergedBufer(this.device),
+          vertex_size: forward_vertex_layout[0].arrayStride,
           geometries: [],
-          color_attachments: [forward_color_attachment],
+          color_attachments: forward_attachments,
           depth_attachment: forward_depth_attachment
-        },
-        shadow_pass: {
-          shader: shadow_shader,
-          pipeline: shadow_render_pipeline,
-          bind_groups: [shadow_bind_group],
-          geometries: [],
-          color_attachments: shadow_color_attachments,
-          depth_attachment: shadow_depth_attachment
         },
         skybox_pass: {
           shader: skybox_shader,
           pipeline: skybox_render_pipeline,
           bind_groups: [skybox_bind_group],
+          vertex_size: uv_2d_vertex_layout[0].arrayStride,
           geometries: [{
-            vertices: skybox_vertex_buffer,
-            vertex_count: 3,
+            range: fullscreen_range,
             bind_groups: []
           }],
-          color_attachments: [skybox_color_attachmet],
-          depth_attachment: skybox_depth_attachment
+          geometry_buffer: fullscreen_buffer,
+          color_attachments: forward_attachments,
+          depth_attachment: forward_depth_attachment
         },
-        skybox_vertex_buffer,
-        depth_buffer,
-        shadow_depth_buffer,
-        point_light_buffer: light_buffer,
-        shadow_view_buffer
+        postprocess_pass: {
+          shader: postprocess_shader,
+          pipeline: postprocess_render_pipeline,
+          bind_groups: [postprocess_bind_group],
+          vertex_size: uv_2d_vertex_layout[0].arrayStride,
+          geometries: [{
+            range: fullscreen_range,
+            bind_groups: []
+          }],
+          geometry_buffer: fullscreen_buffer,
+          color_attachments: [postprocess_color_attachmet]
+        },
+        depth_buffer
       };
     }
     verify_attachments(passes) {
+      for (let i = 1; i < passes.length; i++) {
+        if (passes[i].color_attachments != passes[i - 1].color_attachments)
+          throw new Error("mismatch pass");
+      }
     }
     make_pass_descriptor(passes) {
       this.verify_attachments(passes);
@@ -2734,38 +2900,75 @@
             storeOp: "store"
           } : a;
         }),
-        depthStencilAttachment: passes[0].depth_attachment
+        depthStencilAttachment: passes[0].depth_attachment,
+        label: "render pass descriptor"
       };
     }
-    encode_compute_pass(pass, encoder) {
-      const pass_encoder = encoder.beginComputePass();
-      pass_encoder.setPipeline(pass.pipeline);
-      pass.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx, group));
-      pass_encoder.dispatchWorkgroups(...pass.dispatch_size);
-      pass_encoder.end();
+    merge_geometries(geos) {
+      let cmp_bindgroups = (a, b) => {
+        if (a.length != b.length) {
+          return false;
+        }
+        for (let i = 0; i < a.length; i++) {
+          if (a[i] != b[i])
+            return false;
+        }
+        return true;
+      };
+      let ret = [];
+      for (let i = 0; i < geos.length; i++) {
+        if (ret.length == 0) {
+          ret.push(geos[i]);
+        } else {
+          let prev = ret[ret.length - 1];
+          if (prev.range.indices.count + prev.range.indices.start == geos[i].range.indices.start && cmp_bindgroups(prev.bind_groups, geos[i].bind_groups)) {
+            prev.range.indices.count += geos[i].range.indices.count;
+          } else {
+            let r = geos[i].range;
+            let range = { indices: { start: r.indices.start, count: r.indices.count }, vertices: r.vertices };
+            ret.push({ bind_groups: geos[i].bind_groups, range });
+          }
+        }
+      }
+      return ret;
     }
     encode_render_passes(passes, encoder) {
       const pass_descriptor = this.make_pass_descriptor(passes);
+      let tris_rendered = 0;
+      let bind_groups_bound = 0;
+      let draw_calls = 0;
       const pass_encoder = encoder.beginRenderPass(pass_descriptor);
       passes.forEach((pass) => {
         pass_encoder.setPipeline(pass.pipeline);
         pass.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx, group));
-        pass.geometries.forEach((geom) => {
-          pass_encoder.setVertexBuffer(0, geom.vertices);
-          geom.bind_groups.forEach((group, idx) => pass_encoder.setBindGroup(idx + pass.bind_groups.length, group));
-          if (geom.indices) {
-            pass_encoder.setIndexBuffer(geom.indices.indices, geom.indices.index_type);
-            pass_encoder.drawIndexed(geom.vertex_count);
-          } else {
-            pass_encoder.draw(geom.vertex_count);
-          }
+        pass_encoder.setVertexBuffer(0, pass.geometry_buffer.vertex_buffer);
+        pass_encoder.setIndexBuffer(pass.geometry_buffer.index_buffer, "uint32");
+        let existing_bind_groups = [null, null, null, null, null];
+        (pass.optimized_geometries || pass.geometries).forEach((geom) => {
+          geom.bind_groups.forEach((group, idx) => {
+            if (existing_bind_groups[idx + pass.bind_groups.length] != group) {
+              pass_encoder.setBindGroup(idx + pass.bind_groups.length, group);
+              existing_bind_groups[idx + pass.bind_groups.length] = group;
+              bind_groups_bound++;
+            }
+          });
+          pass_encoder.drawIndexed(geom.range.indices.count, 1, geom.range.indices.start, 0);
+          tris_rendered += geom.range.indices.count / 3;
+          draw_calls++;
         });
       });
       pass_encoder.end();
     }
     draw_raster() {
       const command_encoder = this.device.createCommandEncoder();
-      this.encode_render_passes([this.raster.forward_diffuse_pass, this.raster.forward_diffuse_opacity_pass, this.raster.skybox_pass], command_encoder);
+      this.encode_render_passes([
+        this.raster.forward_diffuse_pass,
+        this.raster.forward_diffuse_opacity_pass,
+        this.raster.skybox_pass
+      ], command_encoder);
+      this.encode_render_passes([
+        this.raster.postprocess_pass
+      ], command_encoder);
       this.device.queue.submit([command_encoder.finish()]);
     }
   };
@@ -2837,7 +3040,7 @@
     let opacity;
     if (mat.diffuse) {
       try {
-        diffuse = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
+        diffuse = await load_texture(parent_path + "/" + mat.diffuse);
       } catch (e) {
         diffuse = await blank_texture();
         console.log(`Error loading ${mat.diffuse}`);
@@ -2847,7 +3050,7 @@
     }
     if (mat.opacity) {
       try {
-        opacity = await load_texture("StgDolpic_Chikei/" + mat.opacity);
+        opacity = await load_texture(parent_path + "/" + mat.opacity);
       } catch (e) {
         console.log(`Error loading ${mat.opacity}`);
       }
@@ -2867,7 +3070,7 @@
     return await load_texture("missing.png");
   }
   async function load_json_model(path) {
-    let model = await (await fetch(path)).json();
+    let model = await (await fetch(path + "/verts.json")).json();
     let materials = await Promise.all(model.materials.map((m) => {
       return load_material(m, path);
     }));
@@ -2922,32 +3125,32 @@
     const app = new App(device, context, RES_X, RES_Y);
     const perspective2 = mat4_exports.create();
     mat4_exports.perspective(perspective2, Math.PI / 2, RES_X / RES_Y, 0.1, null);
-    load_json_model("StgDolpic_Chikei/verts.json").then((meshes) => {
+    load_json_model("Windfall").then((meshes) => {
       meshes.forEach((mesh) => {
         if (mesh.indices.length > 0) {
           app.add_mesh(mesh);
         }
       });
+      app.optimize_buffers();
     });
-    let t = Math.PI;
     const camera = new Camera();
+    let frame_count = 0;
+    let last_time = 0;
     const run = () => {
+      requestAnimationFrame(run);
       camera.update(8e-3);
       let mvp = mat4_exports.create();
       const view = camera.view();
       mat4_exports.multiply(mvp, perspective2, view);
-      const light = app.scene.lights[0];
-      const center = 50;
-      light.color = [1, 1, 1];
-      light.luminance = 1;
-      light.dir = [Math.cos(t), 0, Math.sin(t)];
-      light.pos = [-Math.cos(t) * 2 * center + center, center, -Math.sin(t) * 2 * center + center];
-      app.update_lights();
       app.set_camera(mvp);
       app.draw_raster();
-      requestAnimationFrame(run);
+      frame_count++;
+      if (frame_count % 300 == 0) {
+        console.log("FPS ", 300 / ((performance.now() - last_time) / 1e3));
+        last_time = performance.now();
+      }
     };
-    run();
+    requestAnimationFrame(run);
   }
   main();
 })();

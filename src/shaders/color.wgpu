@@ -2,15 +2,12 @@
 var<uniform> camera: mat4x4f;
 
 @group(0) @binding(1)
-var<storage, read> lights: LightBuffer;
-
-@group(0) @binding(2)
 var tex_sampler: sampler; 
 
-@group(1) @binding(3)
+@group(1) @binding(2)
 var diffuse_texture : texture_2d<f32>;
 
-@group(1) @binding(4)
+@group(1) @binding(3)
 var opacity_texture : texture_2d<f32>;
 
 override has_opacity: bool;
@@ -19,37 +16,6 @@ struct VertexOut {
   @builtin(position) position : vec4f,
   @location(0) normal : vec3f,
   @location(1) uv : vec2f,
-}
-
-struct Light {
-  data1: vec4f,
-  data2: vec4f
-}
-
-fn light_pos(l: Light) -> vec3f {
-  return l.data1.xyz;
-} 
-
-fn light_dir(l: Light) -> vec3f {
-  return l.data1.xyz;
-}
-
-fn light_type(l: Light) -> f32 {
-  return l.data1.w;
-}
-
-fn light_luminance(l: Light) -> f32 {
-  return l.data2.w;
-}
-
-fn light_color(l: Light) -> vec3f {
-  return l.data2.xyz;
-}
-
-struct LightBuffer {
-  count: u32,
-  ambient_luminance: f32,
-  lights: array<Light>
 }
 
 @vertex
@@ -64,57 +30,31 @@ fn vertex_main(@location(0) position: vec3f,
   return output;
 }
 
+struct FragmentOut {
+  @location(0) color: vec4f,
+  @location(1) position: vec4f,
+  @location(2) normal: vec4f,
+};
+
 @fragment
-fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
+fn fragment_main(fragData: VertexOut) -> FragmentOut
 {
   let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);
-  var opacity = 1.0; 
+  var opacity = color.w; 
   if(has_opacity){
     opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;
   }
+  if(opacity < 0.01){
+    discard;
+  }
 
-  let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;
+  /*let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;
   let ambient_light = 0.5;
   let lighted_color = color * (directional_light + ambient_light);
-  return vec4(lighted_color.xyz,opacity);
-  /*
-  var color: vec3f = vec3f(0,0,0);
-  let directional = dot(fragData.normal, vec3f(0, 1, 0));
-  let ambient = 0.2;
-  return vec4f(fragData.color * (directional + ambient), 1);
-
-
-  for(var i: u32 = 0; i < lights.count; i++){
-    let light = lights.lights[i];
-    if(light_type(light) == 0){
-      //point light
-      let dir = normalize(fragData.world_pos - light_pos(light));
-      let normal_dot = max(-dot(dir, fragData.normal),0);
-      let intensity = normal_dot * light_luminance(light);
-      color += light_color(light) * intensity;
-    } else {
-      //directional light
-      let dir = light_dir(light);
-      let normal_dot = max(-dot(dir, fragData.normal),0);
-      let intensity = normal_dot * light_luminance(light);
-      color += light_color(light) * intensity;
-    }
-  }
-  let ambient = lights.ambient_luminance + fragData.luminance;
-  color += ambient;
-  return vec4f(color * fragData.color, 1);
-
-
-  return vec4f(ambient * fragData.color,1);
-
-  let shadow_pos = (shadow_view * vec4(fragData.world_pos, 1));
-  let uv = (shadow_pos.xy / shadow_pos.w) * vec2f(0.5, -0.5) + 0.5;
-  let shadow_depth = textureSample(shadow_texture, shadow_sampler, uv);
-  let frag_depth = shadow_pos.z / shadow_pos.w;
-  let diff = frag_depth - shadow_depth;
-  if(diff > 0.001){
-  }
-
-  return vec4f(color * fragData.color, 1);
 */
+  var frag = FragmentOut();
+  frag.color = vec4(color.xyz, opacity);
+  frag.normal = vec4f(fragData.normal,0.0);
+  frag.position = fragData.position;
+  return frag;
 }

@@ -1,9 +1,21 @@
 @group(0) @binding(0)
-var<storage, read_write> output: array<atomic<u32>>;
+var input_image : texture_2d<f32>;
 
-var<workgroup> atomic_inc: atomic<u32>;
+@group(0) @binding(1)
+var output_image : texture_storage_2d<rgba8unorm, write>;
 
-@compute @workgroup_size(64)
+override dimx: u32;
+override dimy: u32;
+
+struct Settings {
+  output_size: vec2u,
+}
+
+fn reduce(a: vec4f, b: vec4f) -> vec4f {
+  return a+b;
+}
+
+@compute @workgroup_size(dimx, dimy)
 fn main(
   @builtin(global_invocation_id)
   global_id : vec3u,
@@ -11,7 +23,15 @@ fn main(
   @builtin(local_invocation_id)
   local_id : vec3u,
 ) {
-  let i = atomicAdd(&output[0], 1);
-  atomicStore(&output[global_id.x + 1], i);
-  //output[global_id.x + 1] = i;
+  let dims = textureDimensions(output_image);
+  if(local_id.x >= dims.x || local_id.y >= dims.y){
+    return;
+  }
+  var val = vec4f(0,0,0,0);
+  for(var x:u32 = 0; x < 2; x++){
+    for(var y:u32 = 0; y < 2; y++){
+      val = reduce(val, textureLoad(input_image, global_id.xy*2+vec2u(x,y), 0));
+    }
+  }
+  textureStore(output_image, global_id.xy, val/4.0);
 }

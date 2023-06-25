@@ -40,7 +40,7 @@ async function load_material(mat: RawMaterial, parent_path: string): Promise<Mat
     let opacity;
     if(mat.diffuse){
         try {
-            diffuse = await load_texture("StgDolpic_Chikei/" + mat.diffuse);
+            diffuse = await load_texture(parent_path + "/" + mat.diffuse);
         } catch(e){
             diffuse = await blank_texture();
             console.log(`Error loading ${mat.diffuse}`);
@@ -50,7 +50,7 @@ async function load_material(mat: RawMaterial, parent_path: string): Promise<Mat
     }
     if(mat.opacity){
         try {
-            opacity = await load_texture("StgDolpic_Chikei/" + mat.opacity);
+            opacity = await load_texture(parent_path + "/" + mat.opacity);
         } catch(e){
             console.log(`Error loading ${mat.opacity}`);
         }
@@ -77,7 +77,7 @@ async function blank_texture(): Promise<Texture> {
 }
 
 export async function load_json_model(path: string): Promise<Mesh[]> {
-    let model: RawModel = await (await fetch(path)).json()
+    let model: RawModel = await (await fetch(path + "/verts.json")).json()
     let materials = await Promise.all(model.materials.map((m: RawMaterial)=>{
         return load_material(m, path);
     }));
