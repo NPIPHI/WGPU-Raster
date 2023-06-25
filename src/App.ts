@@ -121,6 +121,8 @@ export class App {
         }
 
         let diffuse = this.get_texture(mesh.material.diffuse);
+        
+        console.log(diffuse.tex.width, diffuse.tex.height);
 
         let bind_group;
         let opacity = mesh.material.opacity ? this.get_texture(mesh.material.opacity) : diffuse;
@@ -511,7 +513,7 @@ export class App {
             },
             primitive: {
                 topology: "triangle-list",
-                cullMode: "back",
+                cullMode: "none",
             },
             depthStencil: {
                 format: "depth32float",
@@ -538,7 +540,7 @@ export class App {
             },
             primitive: {
                 topology: "triangle-list",
-                cullMode: "back",
+                cullMode: "none",
             },
             depthStencil: {
                 format: "depth32float",
@@ -715,9 +717,14 @@ export class App {
         // console.log(draw_calls, tris_rendered, bind_groups_bound);
     }
 
-    draw_raster() {
-        const command_encoder = this.device.createCommandEncoder();
+    private sort_triangles() {
+        this.raster.forward_diffuse_pass.geometry_buffer;
+    }
 
+    draw_raster() {
+        this.sort_triangles();
+        const command_encoder = this.device.createCommandEncoder();
+        
         this.encode_render_passes([
             this.raster.forward_diffuse_pass, 
             this.raster.forward_diffuse_opacity_pass, 

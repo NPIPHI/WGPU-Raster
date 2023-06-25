@@ -18,7 +18,6 @@ export class MergedBufer {
     private index_size: number;
     private vertex_cap: number;
     private index_cap: number;
-    private index_starts: number[];
 
     public vertex_buffer: GPUBuffer;
     public index_buffer: GPUBuffer;

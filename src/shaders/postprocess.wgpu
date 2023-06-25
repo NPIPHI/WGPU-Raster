@@ -40,7 +40,7 @@ fn gauss(x: i32, y: i32, a: f32) -> f32{
     return exp(-f32(x*x+y*y)/(2.0 * a*a));
 }
 
-fn gauss_kernal(start: vec2u, radius: u32, a: f32) -> vec4f {
+fn gauss_kernal(start: vec2i, radius: u32, a: f32) -> vec4f {
     var sum = vec4f();
     var coeff_sum = 0.0;
     let r = i32(radius);
@@ -48,9 +48,9 @@ fn gauss_kernal(start: vec2u, radius: u32, a: f32) -> vec4f {
     for(var x: i32 = -r + 1; x < r; x++){
         for(var y: i32 = -r + 1; y < r; y++){
             let g = gauss(x,y,a);
-            let depth = textureLoad(position_tex, vec2i(start) + vec2i(x,y), 0).w;
+            let depth = textureLoad(position_tex, start + vec2i(x,y), 0).w;
             if(depth + 1 > start_depth){
-                sum += g * textureLoad(color_tex, vec2i(start) + vec2i(x,y), 0);
+                sum += g * textureLoad(color_tex, start + vec2i(x,y), 0);
                 coeff_sum += g;
             }
         }
@@ -65,11 +65,23 @@ fn luminance(color: vec4f) -> f32{
 override kernalx: u32 = 4;
 override kernaly: u32 = 4;
 
+const WATER_BLUE = vec4f(0.9,0.9,1.3,1);
+
+fn color_reflect(pos: vec2i) -> vec4f {
+    for(var i = 0; i < 60; i++){
+        let c = textureLoad(position_tex, pos + vec2i(0,-i),0);
+        if(c.w != 10000){
+            return textureLoad(color_tex, pos + vec2i(0,-2*i),0) * WATER_BLUE;
+        }
+    }
+    return textureLoad(color_tex, pos, 0) * WATER_BLUE;
+}
+
 @fragment
 fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
 {
     let dim = textureDimensions(color_tex);
-    let iuv = vec2u(fragData.uv * vec2f(dim));
+    let iuv = vec2i(fragData.uv * vec2f(dim));
     let pos = textureLoad(position_tex, iuv, 0);
     let norm = textureLoad(normal_tex, iuv, 0);
     let ambient = 0.5;
@@ -77,7 +89,9 @@ fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
     let light = ambient + directional * 0.5;
     let depth = pos.w;
     var color = vec3f();
-    if(depth > 200){
+    if(depth == 10000){
+        color = color_reflect(iuv).xyz;
+    } else if(depth > 200){
         color = gauss_kernal(iuv, kernalx, depth/300).xyz;
     } else {
         color = textureLoad(color_tex, iuv, 0).xyz;
