@@ -14,8 +14,9 @@ override has_opacity: bool;
 
 struct VertexOut {
   @builtin(position) position : vec4f,
-  @location(0) normal : vec3f,
-  @location(1) uv : vec2f,
+  @location(0) world_position: vec3f,
+  @location(1) normal : vec3f,
+  @location(2) uv : vec2f,
 }
 
 @vertex
@@ -25,6 +26,7 @@ fn vertex_main(@location(0) position: vec3f,
 {
   var output : VertexOut;
   output.position = (camera * vec4f(position, 1));
+  output.world_position = position;
   output.normal = normal;
   output.uv = vec2(uv.x, 1-uv.y);
   return output;
@@ -55,6 +57,6 @@ fn fragment_main(fragData: VertexOut) -> FragmentOut
   var frag = FragmentOut();
   frag.color = vec4(color.xyz, opacity);
   frag.normal = vec4f(fragData.normal,0.0);
-  frag.position = fragData.position;
+  frag.position = vec4f(fragData.world_position.xyz, fragData.position.w);
   return frag;
 }

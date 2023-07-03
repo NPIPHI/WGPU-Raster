@@ -14,35 +14,44 @@ export type DrawableRange = {
 export class MergedBufer {
     private merged_vertices: Float32Array;
     private merged_indices: Uint32Array;
-    private vertex_size: number;
-    private index_size: number;
+    vertex_size: number;
+    index_size: number;
     private vertex_cap: number;
     private index_cap: number;
 
     public vertex_buffer: GPUBuffer;
     public index_buffer: GPUBuffer;
+    private usage: GPUBufferUsageFlags;
 
     private device: GPUDevice;
 
-    constructor(device: GPUDevice, initial_size: number = 1024){
+    constructor(device: GPUDevice, flags: GPUBufferUsageFlags = 0, initial_size: number = 1024){
         if(initial_size < 128) initial_size = 128;
         this.device = device;
         this.merged_vertices = new Float32Array(initial_size);
         this.merged_indices = new Uint32Array(initial_size);
+        this.usage = GPUBufferUsage.COPY_DST | flags;
         this.vertex_buffer = this.device.createBuffer({
             size: FLOAT_SIZE * initial_size,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX
+            usage: GPUBufferUsage.VERTEX | this.usage
         })
 
         this.index_buffer = this.device.createBuffer({
             size: FLOAT_SIZE * initial_size,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
+            usage: GPUBufferUsage.INDEX | this.usage
         })
 
         this.vertex_size = 0;
         this.index_size = 0;
         this.vertex_cap = initial_size;
         this.index_cap = initial_size;
+    }
+
+    vertices(): Float32Array{
+        return this.merged_vertices.subarray(0, this.vertex_size);
+    }
+    indices(): Uint32Array{
+        return this.merged_indices.subarray(0, this.index_size);
     }
 
     add_geometry(vertices: Float32Array, indices: Uint32Array): DrawableRange {

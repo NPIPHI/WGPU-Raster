@@ -1,0 +1,250 @@
+struct LightSample {
+    data: vec4f,
+}
+
+struct Settings {
+    dims: vec2u,
+    samples: u32,
+    reset: u32,
+    frame_count: u32,
+}
+
+struct BVHNode {
+    min: vec4f, //.w = left, <0 = -tri_count
+    max: vec4f, //.w = right, <0 = tri_ptr (float elements)
+};
+
+@group(0) @binding(0)
+var<uniform> settings: Settings;
+
+@group(0) @binding(1)
+var<storage, read_write> light_accumulation: array<LightSample>;
+
+@group(0) @binding(2)
+var position_tex: texture_2d<f32>;
+
+@group(0) @binding(3)
+var normal_tex: texture_2d<f32>;
+
+@group(1) @binding(4)
+var<storage, read> tree: array<BVHNode>;
+
+@group(1) @binding(5)
+var<storage, read> triangles: array<f32>;
+
+var<private> rng_seed: u32;
+
+override dimx: u32 = 8;
+override dimy: u32 = 8;
+const TRIANGLE_SIZE = 9;
+
+struct Triangle {
+    v0: vec3f,
+    v1: vec3f,
+    v2: vec3f,
+}
+
+struct Gaussian {
+    dir: vec3f,
+    amplitude: vec3f,
+    sharpness: f32,
+}
+
+fn GaussEvaluate(g: Gaussian, dir: vec3f) -> vec3f {
+    return g.amplitude * exp(g.sharpness * (dot(dir, g.dir) - 1));
+}
+
+fn seed_rng(global_id: vec2u) {
+    rng_seed = global_id.x * 4096 + global_id.y * 4096 * 4096 + settings.frame_count;
+}
+
+fn pcg_hash(input: u32) -> u32 {
+    let state = input * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+fn rand_float() -> f32 {
+    rng_seed = pcg_hash(rng_seed);
+    return f32(rng_seed) / f32(0xffffffffu);
+}
+
+fn intersect_bvhleaf(o: vec3f, v: vec3f, node: BVHNode) -> bool {
+    let ct = u32(-node.min.w);
+    let ptr = u32(node.max.w);
+
+    for(var i:u32 = 0; i < ct; i++){
+        if(ray_tri_ptr_intersect(o, v, ptr + i * TRIANGLE_SIZE)){
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn raytrace_bvh(o: vec3f, v: vec3f) -> bool {
+    var stack = array<u32, 32>();
+    let inv_v = 1.0 / v;
+    let sign = vec3i(i32(v.x < 0), i32(v.y < 0), i32(v.z < 0));
+    var intersects = 0;
+    for(var stack_ptr = 0; stack_ptr >= 0;){
+        let node_idx = stack[stack_ptr];
+        let node = tree[node_idx];
+        if(fast_ray_cube_intersect(o, v, inv_v, sign, node.min.xyz, node.max.xyz)) {
+            if(node.min.w >= 0){ //internal node
+                stack[stack_ptr] = u32(node.min.w);
+                stack_ptr++;
+                stack[stack_ptr] = u32(node.max.w);
+            } else {
+                if(intersect_bvhleaf(o,v,node)){
+                    return true;
+                }
+                stack_ptr--;
+            }
+        } else {
+            stack_ptr--;
+        }
+    }
+    return false;
+}
+
+@compute @workgroup_size(dimx, dimy)
+fn main(
+    @builtin(global_invocation_id)
+    global_id: vec3u,
+
+    @builtin(local_invocation_id)
+    local_id: vec3u,
+) {
+    if(global_id.x > settings.dims.x || global_id.y > settings.dims.y){
+        return;
+    }
+
+    let pos = textureLoad(position_tex, global_id.xy, 0);
+    if(pos.w == 10000.0){
+        return;
+    }
+    let normal = textureLoad(normal_tex, global_id.xy, 0).xyz;
+
+
+    seed_rng(global_id.xy / vec2u(dimx, dimy));
+    //seed_rng(global_id.xy);
+
+    let light_dir = normalize(vec3f(0,0.3,1));
+    let intensity = 32.0;
+    let gauss = Gaussian(light_dir, vec3(intensity,intensity,intensity), 16.0);
+
+
+    var sample = light_accumulation[settings.dims.x * global_id.y + global_id.x];
+    if(settings.reset != 0){
+        sample.data = vec4f(0);
+    }
+
+    for(var i:u32 = 0; i < settings.samples; i++){
+        var sample_dir = normalize(vec3f(
+            rand_float() * 2.0 - 1.0,
+            rand_float() * 2.0 - 1.0,
+            rand_float() * 2.0 - 1.0,
+        ));
+        var norm_dot = dot(sample_dir, normal);
+        if(norm_dot < 0){
+            sample_dir = sample_dir - 2.0 * normal * norm_dot;
+            norm_dot = -norm_dot;
+        }
+        if(raytrace_bvh(pos.xyz + sample_dir * 0.01, sample_dir)){
+            sample.data += vec4f(0,0,0,1);
+        } else {
+            let g = GaussEvaluate(gauss, sample_dir);
+            sample.data += vec4f(g * norm_dot,1);
+        }
+    }
+
+    light_accumulation[settings.dims.x * global_id.y + global_id.x] = sample;
+}
+
+
+
+
+
+
+fn ray_tri_ptr_intersect(ray_origin: vec3f, ray_vec: vec3f, ptr: u32) -> bool {
+    let t = Triangle(
+        vec3f(triangles[ptr+0], triangles[ptr+1], triangles[ptr+2]),
+        vec3f(triangles[ptr+3], triangles[ptr+4], triangles[ptr+5]),
+        vec3f(triangles[ptr+6], triangles[ptr+7], triangles[ptr+8])
+    );
+    return ray_tri_intersect(ray_origin, ray_vec, t);
+}
+
+fn ray_tri_intersect(ray_origin: vec3f, ray_vec: vec3f, tri: Triangle) -> bool {
+    const EPSILON = 0.0000001;
+    let edge1 = tri.v1 - tri.v0;
+    let edge2 = tri.v2 - tri.v0;
+    let h = cross(ray_vec, edge2);
+    let a = dot(edge1, h);
+    if(a > -EPSILON && a < EPSILON){
+        return false;
+    }
+
+    let f = 1.0 / a;
+    let s = ray_origin - tri.v0;
+    let u = f * dot(s, h);
+
+    if(u < 0.0 || u > 1.0){
+        return false;
+    }
+
+    let q = cross(s, edge1);
+    let v = f * dot(ray_vec, q);
+
+    if(v < 0.0 || u + v > 1.0){
+        return false;
+    }
+
+    let t = f * dot(edge2, q);
+    if(t > EPSILON) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn fast_ray_cube_intersect(ray_origin: vec3f, ray_vec: vec3f, inv_ray_vec: vec3f, sign: vec3i, cube_min: vec3f, cube_max: vec3f) -> bool {
+    let bounds = array(cube_min, cube_max);
+
+    var tmin = (bounds[sign.x].x - ray_origin.x) * inv_ray_vec.x;
+    var tmax = (bounds[1-sign.x].x - ray_origin.x) * inv_ray_vec.x;
+    let tymin = (bounds[sign.y].y - ray_origin.y) * inv_ray_vec.y;
+    let tymax = (bounds[1-sign.y].y - ray_origin.y) * inv_ray_vec.y;
+
+    if( (tmin > tymax) || (tymin > tmax)) {
+        return false;
+    }
+
+    if(tymin > tmin) {
+        tmin = tymin;
+    }
+
+    if(tymax < tmax) {
+        tmax = tymax;
+    }
+    let tzmin = (bounds[sign.z].z - ray_origin.z) * inv_ray_vec.z;
+    let tzmax = (bounds[1-sign.z].z - ray_origin.z) * inv_ray_vec.z;
+
+    if( (tmin > tzmax) || (tzmin > tmax)) {
+        return false;
+    }
+
+    if(tzmin > tmin) {
+        tmin = tzmin;
+    }
+
+    if(tzmax < tmax) {
+        tmax = tzmax;
+    }
+
+    let t1 = 100000.0;
+    let t0 = 0.0;
+
+    return (tmin < t1) && (tmax > t0);
+}

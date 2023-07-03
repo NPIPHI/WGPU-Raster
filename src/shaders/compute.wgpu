@@ -7,12 +7,8 @@ var output_image : texture_storage_2d<rgba8unorm, write>;
 override dimx: u32;
 override dimy: u32;
 
-struct Settings {
-  output_size: vec2u,
-}
-
 fn reduce(a: vec4f, b: vec4f) -> vec4f {
-  return a+b;
+  return vec4f(a.xyz+b.xyz,min(a.w,b.w));
 }
 
 @compute @workgroup_size(dimx, dimy)
@@ -24,14 +20,14 @@ fn main(
   local_id : vec3u,
 ) {
   let dims = textureDimensions(output_image);
-  if(local_id.x >= dims.x || local_id.y >= dims.y){
+  if(global_id.x >= dims.x || global_id.y >= dims.y){
     return;
   }
-  var val = vec4f(0,0,0,0);
+  var val = vec4f(0,0,0,1);
   for(var x:u32 = 0; x < 2; x++){
     for(var y:u32 = 0; y < 2; y++){
       val = reduce(val, textureLoad(input_image, global_id.xy*2+vec2u(x,y), 0));
     }
   }
-  textureStore(output_image, global_id.xy, val/4.0);
+  textureStore(output_image, global_id.xy, vec4f(val.xyz/4.0, val.w));
 }

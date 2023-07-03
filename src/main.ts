@@ -40,20 +40,19 @@ async function main(){
     const perspective = mat4.create();
     mat4.perspective(perspective, Math.PI/2, RES_X/RES_Y, 0.1, null);
 
-    load_json_model("Windfall").then((meshes)=>{
+    load_json_model("Airport").then((meshes)=>{
         meshes.forEach(mesh=>{
-            if(mesh.indices.length > 0){
-                app.add_mesh(mesh)
-            }
+            app.add_mesh(mesh)
         });
         app.optimize_buffers();
+        app.build_bvh();
+        app.set_sample_count(1);
     });
 
     const camera = new Camera();
 
     let frame_count = 0;
     let last_time = 0;
-
 
     const run = ()=>{
         // requestAnimationFrame(run);
@@ -67,11 +66,12 @@ async function main(){
         const view = camera.view();
         mat4.multiply(mvp, perspective, view);
 
-        app.set_camera(mvp);
+        app.set_camera(mvp)
+        app.update_settings(performance.now()/10000);
         app.draw_raster();
         frame_count++;
-        if(frame_count % 300 == 0){
-            console.log("FPS ", 300/((performance.now() - last_time)/1000))
+        if(frame_count % 100 == 0){
+            console.log("FPS ", 100/((performance.now() - last_time)/1000))
             last_time = performance.now();
         }
     }

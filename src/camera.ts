@@ -9,7 +9,7 @@ export class Camera {
     private pitch: number = 0;
     private yaw: number = 0;
     constructor(){
-
+        this.yaw = 3;
         this.keymap = new Map();
         this.pos = vec3.fromValues(20,20,20);
         document.addEventListener('keydown', (ev)=>{

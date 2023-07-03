@@ -2088,16 +2088,19 @@
   };
 
   // src/shaders/postprocess.wgpu
-  var postprocess_default = "@group(0) @binding(0)\r\nvar tex_sampler: sampler;\r\n\r\n@group(0) @binding(1)\r\nvar color_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(2)\r\nvar position_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(3)\r\nvar normal_tex: texture_2d<f32>;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\nconst PI = 3.1415926;\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\nfn average_kernal(start: vec2u, size: vec2u) -> vec4f {\r\n    var sum = vec4f();\r\n    for(var x: u32 = 0; x < size.x; x++){\r\n        for(var y: u32 = 0; y < size.y; y++){\r\n            sum += textureLoad(color_tex, start + vec2u(x,y), 0);\r\n        }\r\n    }\r\n    return sum / f32(size.x * size.y);\r\n}\r\n\r\nfn gauss(x: i32, y: i32, a: f32) -> f32{\r\n    return exp(-f32(x*x+y*y)/(2.0 * a*a));\r\n}\r\n\r\nfn gauss_kernal(start: vec2u, radius: u32, a: f32) -> vec4f {\r\n    var sum = vec4f();\r\n    var coeff_sum = 0.0;\r\n    let r = i32(radius);\r\n    let start_depth = textureLoad(position_tex, start, 0).w;\r\n    for(var x: i32 = -r + 1; x < r; x++){\r\n        for(var y: i32 = -r + 1; y < r; y++){\r\n            let g = gauss(x,y,a);\r\n            let depth = textureLoad(position_tex, vec2i(start) + vec2i(x,y), 0).w;\r\n            if(depth + 1 > start_depth){\r\n                sum += g * textureLoad(color_tex, vec2i(start) + vec2i(x,y), 0);\r\n                coeff_sum += g;\r\n            }\r\n        }\r\n    }\r\n    return sum / coeff_sum;\r\n}\r\n\r\nfn luminance(color: vec4f) -> f32{\r\n    return color.x + color.y + color.z;\r\n}\r\n\r\noverride kernalx: u32 = 4;\r\noverride kernaly: u32 = 4;\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    let dim = textureDimensions(color_tex);\r\n    let iuv = vec2u(fragData.uv * vec2f(dim));\r\n    let pos = textureLoad(position_tex, iuv, 0);\r\n    let norm = textureLoad(normal_tex, iuv, 0);\r\n    let ambient = 0.5;\r\n    let directional = max(dot(norm.xyz, vec3(0, 0.3, 0.9)), 0);\r\n    let light = ambient + directional * 0.5;\r\n    let depth = pos.w;\r\n    var color = vec3f();\r\n    if(depth > 200){\r\n        color = gauss_kernal(iuv, kernalx, depth/300).xyz;\r\n    } else {\r\n        color = textureLoad(color_tex, iuv, 0).xyz;\r\n    }\r\n    return vec4(color.xyz * light, 1.0);\r\n}\r\n";
+  var postprocess_default = "struct Settings {\r\n    dims: vec2u,\r\n    time: f32,\r\n};\r\n\r\nstruct BVHNode {\r\n    min: vec4f, //.w = left, <0 = -tri_count\r\n    max: vec4f, //.w = right, <0 = tri_ptr (float elements)\r\n};\r\n\r\nstruct LightSample {\r\n    data: vec4f,\r\n}\r\n\r\n@group(0) @binding(0)\r\nvar<uniform> settings: Settings;\r\n\r\n@group(0) @binding(1)\r\nvar color_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(2)\r\nvar position_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(3)\r\nvar normal_tex: texture_2d<f32>;\r\n\r\n@group(1) @binding(4)\r\nvar<storage, read> tree: array<BVHNode>;\r\n\r\n@group(1) @binding(5)\r\nvar<storage, read> triangles: array<f32>;\r\n\r\n@group(1) @binding(6)\r\nvar<storage, read> light_accumulation: array<LightSample>;\r\n\r\nvar<private> rng_state: u32;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\nconst PI = 3.1415926;\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\n\r\noverride kernalx: u32 = 4;\r\noverride kernaly: u32 = 4;\r\n\r\nconst WATER_BLUE = vec4f(0.9,0.9,1.3,1);\r\nconst VERTEX_SIZE = 8;\r\nconst TRIANGLE_SIZE = 9;\r\nconst RNG_A:u32 = 48271;\r\nconst RNG_M:u32 = 2147483647;\r\n\r\nstruct Triangle {\r\n    v0: vec3f,\r\n    v1: vec3f,\r\n    v2: vec3f,\r\n}\r\n\r\nstruct Gaussian {\r\n    dir: vec3f,\r\n    amplitude: vec3f,\r\n    sharpness: f32,\r\n}\r\n\r\nfn GaussEvaluate(g: Gaussian, dir: vec3f) -> vec3f {\r\n    return g.amplitude * exp(g.sharpness * (dot(dir, g.dir) - 1));\r\n}\r\n\r\nfn seed_rand(a: f32, b: f32, c: f32) {\r\n    rng_state = u32(a * 1000 + b * 10000000 + c * 1000000000);\r\n}\r\n\r\nfn rand() -> f32 {\r\n    rng_state = (RNG_A * rng_state) % RNG_M;\r\n    return f32(rng_state % 0xffff) / f32(0xffff);\r\n}\r\n\r\nfn fast_ray_cube_intersect2(ray_origin: vec3f, ray_vec: vec3f, inv_ray_vec: vec3f, cube_min: vec3f, cube_max: vec3f) -> bool {\r\n    let t1 = (cube_min - ray_origin) * inv_ray_vec;\r\n    let t2 = (cube_max - ray_origin) * inv_ray_vec;\r\n    let tmin = min(t1,t2);\r\n    let tmax = max(t1,t2);\r\n\r\n    return max(max(tmin.x, tmin.y), tmin.z) <= min(min(tmax.x, tmax.y), tmax.z);\r\n}\r\n\r\nfn fast_ray_cube_intersect(ray_origin: vec3f, ray_vec: vec3f, inv_ray_vec: vec3f, sign: vec3i, cube_min: vec3f, cube_max: vec3f) -> bool {\r\n    let bounds = array(cube_min, cube_max);\r\n\r\n    var tmin = (bounds[sign.x].x - ray_origin.x) * inv_ray_vec.x;\r\n    var tmax = (bounds[1-sign.x].x - ray_origin.x) * inv_ray_vec.x;\r\n    let tymin = (bounds[sign.y].y - ray_origin.y) * inv_ray_vec.y;\r\n    let tymax = (bounds[1-sign.y].y - ray_origin.y) * inv_ray_vec.y;\r\n\r\n    if( (tmin > tymax) || (tymin > tmax)) {\r\n        return false;\r\n    }\r\n\r\n    if(tymin > tmin) {\r\n        tmin = tymin;\r\n    }\r\n\r\n    if(tymax < tmax) {\r\n        tmax = tymax;\r\n    }\r\n    let tzmin = (bounds[sign.z].z - ray_origin.z) * inv_ray_vec.z;\r\n    let tzmax = (bounds[1-sign.z].z - ray_origin.z) * inv_ray_vec.z;\r\n\r\n    if( (tmin > tzmax) || (tzmin > tmax)) {\r\n        return false;\r\n    }\r\n\r\n    if(tzmin > tmin) {\r\n        tmin = tzmin;\r\n    }\r\n\r\n    if(tzmax < tmax) {\r\n        tmax = tzmax;\r\n    }\r\n\r\n    let t1 = 100000.0;\r\n    let t0 = 0.0;\r\n\r\n    return (tmin < t1) && (tmax > t0);\r\n}\r\n\r\nfn ray_cube_interset(ray_origin: vec3f, ray_vec: vec3f, cube_min: vec3f, cube_max: vec3f) -> bool {\r\n    var tmin = 0.0;\r\n    var tmax = 0.0;\r\n    var tymin = 0.0;\r\n    var tymax = 0.0;\r\n    var tzmin = 0.0;\r\n    var tzmax = 0.0;\r\n    if (ray_vec.x >= 0) {\r\n        tmin = (cube_min.x - ray_origin.x) / ray_vec.x;\r\n        tmax = (cube_max.x - ray_origin.x) / ray_vec.x;\r\n    } else {\r\n        tmin = (cube_max.x - ray_origin.x) / ray_vec.x;\r\n        tmax = (cube_min.x - ray_origin.x) / ray_vec.x;\r\n    }\r\n    if (ray_vec.y >= 0) {\r\n        tymin = (cube_min.y - ray_origin.y) / ray_vec.y;\r\n        tymax = (cube_max.y - ray_origin.y) / ray_vec.y;\r\n    }\r\n    else {\r\n        tymin = (cube_max.y - ray_origin.y) / ray_vec.y;\r\n        tymax = (cube_min.y - ray_origin.y) / ray_vec.y;\r\n    }\r\n    if ( (tmin > tymax) || (tymin > tmax) ) {\r\n        return false;\r\n    }\r\n    if (tymin > tmin){\r\n        tmin = tymin;\r\n    }\r\n    if (tymax < tmax){\r\n        tmax = tymax;\r\n    }\r\n    if (ray_vec.z >= 0) {\r\n        tzmin = (cube_min.z - ray_origin.z) / ray_vec.z;\r\n        tzmax = (cube_max.z - ray_origin.z) / ray_vec.z;\r\n    } else {\r\n        tzmin = (cube_max.z - ray_origin.z) / ray_vec.z;\r\n        tzmax = (cube_min.z - ray_origin.z) / ray_vec.z;\r\n    }\r\n    if ( (tmin > tzmax) || (tzmin > tmax) ) {\r\n        return false;\r\n    }\r\n    if (tzmin > tmin) {\r\n        tmin = tzmin;\r\n    }\r\n    if (tzmax < tmax) {\r\n        tmax = tzmax;\r\n    }\r\n    let t1 = 100000.0;\r\n    let t0 = 0.0;\r\n    return ( (tmin < t1) && (tmax > t0) );\r\n}\r\n\r\nfn ray_tri_intersect(ray_origin: vec3f, ray_vec: vec3f, tri: Triangle) -> bool {\r\n    const EPSILON = 0.0000001;\r\n    let edge1 = tri.v1 - tri.v0;\r\n    let edge2 = tri.v2 - tri.v0;\r\n    let h = cross(ray_vec, edge2);\r\n    let a = dot(edge1, h);\r\n    if(a > -EPSILON && a < EPSILON){\r\n        return false;\r\n    }\r\n\r\n    let f = 1.0 / a;\r\n    let s = ray_origin - tri.v0;\r\n    let u = f * dot(s, h);\r\n\r\n    if(u < 0.0 || u > 1.0){\r\n        return false;\r\n    }\r\n\r\n    let q = cross(s, edge1);\r\n    let v = f * dot(ray_vec, q);\r\n\r\n    if(v < 0.0 || u + v > 1.0){\r\n        return false;\r\n    }\r\n\r\n    let t = f * dot(edge2, q);\r\n    if(t > EPSILON) {\r\n        return true;\r\n    } else {\r\n        return false;\r\n    }\r\n}\r\n\r\nfn ray_tri_ptr_intersect(ray_origin: vec3f, ray_vec: vec3f, ptr: u32) -> bool {\r\n    let t = Triangle(\r\n        vec3f(triangles[ptr+0], triangles[ptr+1], triangles[ptr+2]),\r\n        vec3f(triangles[ptr+3], triangles[ptr+4], triangles[ptr+5]),\r\n        vec3f(triangles[ptr+6], triangles[ptr+7], triangles[ptr+8])\r\n    );\r\n    return ray_tri_intersect(ray_origin, ray_vec, t);\r\n}\r\n\r\nfn intersect_bvhleaf(o: vec3f, v: vec3f, node: BVHNode) -> bool {\r\n    let ct = u32(-node.min.w);\r\n    let ptr = u32(node.max.w);\r\n\r\n    for(var i:u32 = 0; i < ct; i++){\r\n        if(ray_tri_ptr_intersect(o, v, ptr + i * TRIANGLE_SIZE)){\r\n            return true;\r\n        }\r\n    }\r\n\r\n    return false;\r\n}\r\n\r\nfn raytrace_bvh(o: vec3f, v: vec3f) -> bool {\r\n    var stack = array<u32, 32>();\r\n    let inv_v = 1.0 / v;\r\n    let sign = vec3i(i32(v.x < 0), i32(v.y < 0), i32(v.z < 0));\r\n    var intersects = 0;\r\n    for(var stack_ptr = 0; stack_ptr >= 0;){\r\n        let node_idx = stack[stack_ptr];\r\n        let node = tree[node_idx];\r\n        if(fast_ray_cube_intersect(o, v, inv_v, sign, node.min.xyz, node.max.xyz)) {\r\n            if(node.min.w >= 0){ //internal node\r\n                stack[stack_ptr] = u32(node.min.w);\r\n                stack_ptr++;\r\n                stack[stack_ptr] = u32(node.max.w);\r\n            } else {\r\n                if(intersect_bvhleaf(o,v,node)){\r\n                    return true;\r\n                }\r\n                stack_ptr--;\r\n            }\r\n        } else {\r\n            stack_ptr--;\r\n        }\r\n    }\r\n    return false;\r\n}\r\n\r\nfn point_cube_intersect(o: vec3f, cube_min: vec3f, cube_max: vec3f) -> bool {\r\n    return \r\n    o.x > cube_min.x && \r\n    o.x < cube_max.x && \r\n    o.y > cube_min.y && \r\n    o.y < cube_max.y && \r\n    o.z > cube_min.z && \r\n    o.z < cube_max.z;\r\n}\r\n\r\nfn raytrace(o: vec3f, v: vec3f) -> bool {\r\n    let ct = arrayLength(&triangles);\r\n    for(var i:u32 = 0; i < ct; i+=9){\r\n        if(ray_tri_ptr_intersect(o,v,i)){\r\n            return true;\r\n        }\r\n    }\r\n    return false;\r\n}\r\n\r\nfn get_light(iuv: vec2u) -> vec3f {\r\n    let dims = settings.dims;\r\n    let l = light_accumulation[dims.x * iuv.y + iuv.x].data;\r\n    return l.xyz/l.w;\r\n}\r\n\r\nfn precomputed(fragData: VertexOut) -> vec4f {\r\n    let dims = settings.dims;\r\n    let iuv = vec2u(fragData.uv * vec2f(dims));\r\n    let color = textureLoad(color_tex, iuv, 0).xyz;\r\n    let pos = textureLoad(position_tex, iuv, 0);\r\n    let light = get_light(iuv);\r\n    //let light = (get_light(iuv) + get_light(iuv + vec2(1,0)) + get_light(iuv + vec2(0,1)) + get_light(iuv + vec2(1,1))) / 4.0;\r\n    if(pos.w == 10000){\r\n        return vec4(color,1);\r\n    }\r\n    return vec4f(light*color.xyz, 1.0);\r\n}\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> @location(0) vec4f\r\n{\r\n    return precomputed(fragData);\r\n\r\n    seed_rand(settings.time, fragData.uv.x, fragData.uv.y);\r\n    let light_dir = normalize(vec3(sin(settings.time), cos(settings.time), 1));\r\n    //let light_dir = vec3f(0,0,1);\r\n    let dims = settings.dims;\r\n    let iuv = vec2u(fragData.uv * vec2f(dims));\r\n    let ray_light = light_accumulation[dims.x * iuv.y + iuv.x].data;\r\n    let pos = textureLoad(position_tex, iuv, 0);\r\n    let norm = textureLoad(normal_tex, iuv, 0);\r\n    let ambient = 0.5;\r\n    let directional = max(dot(norm.xyz, light_dir), 0);\r\n    let light = ambient + directional * 0.5;\r\n    let depth = pos.w;\r\n    var color = textureLoad(color_tex, iuv, 0).xyz;\r\n\r\n    let gauss = Gaussian(light_dir, vec3(1,1,1), 4.0);\r\n\r\n    if(depth == 10000){\r\n        return vec4(color,1);\r\n    }\r\n\r\n    let ct:u32 = 1;\r\n    var num_hits = 0;\r\n    var sun_light = vec3f(0,0,0);\r\n    for(var i:u32 = 0; i < ct; i++){\r\n        var sample_dir = normalize(vec3f(\r\n            rand() * 2.0 - 1.0,\r\n            rand() * 2.0 - 1.0,\r\n            rand() * 2.0 - 1.0,\r\n        ));\r\n        var norm_dot = dot(sample_dir, norm.xyz);\r\n        if(norm_dot < 0.0){\r\n            sample_dir = sample_dir - 2.0 * norm.xyz * norm_dot;\r\n            norm_dot = -norm_dot;\r\n        }\r\n        if(!raytrace_bvh(pos.xyz + sample_dir * 0.01, sample_dir)){\r\n            let g = GaussEvaluate(gauss, sample_dir);\r\n            sun_light += vec3f(g * norm_dot);\r\n        }\r\n    }\r\n    \r\n    \r\n    /*for(var i = 0; i < ct; i++){\r\n        let off = vec3f(0,rand()*0.5-0.25,rand()*0.5-0.25);\r\n        let offset_dir = normalize(light_dir + off);\r\n        if(!raytrace_bvh(pos.xyz + offset_dir*0.01, offset_dir)){\r\n            sun_light += GaussEvaluate(gauss, offset_dir);\r\n            num_hits++;\r\n        }\r\n    }*/\r\n    return vec4f(color.xyz * (0.2 + sun_light / f32(ct)), 1.0);\r\n    //return vec4f(color.xyz * (ambient + f32(ct-num_hits) * directional / f32(ct)), 1.0);    \r\n}\r\n\r\n\r\n\r\n\r\n\r\nfn average_kernal(start: vec2u, size: vec2u) -> vec4f {\r\n    var sum = vec4f();\r\n    for(var x: u32 = 0; x < size.x; x++){\r\n        for(var y: u32 = 0; y < size.y; y++){\r\n            sum += textureLoad(color_tex, start + vec2u(x,y), 0);\r\n        }\r\n    }\r\n    return sum / f32(size.x * size.y);\r\n}\r\n\r\nfn gauss(x: i32, y: i32, a: f32) -> f32{\r\n    return exp(-f32(x*x+y*y)/(2.0 * a*a));\r\n}\r\n\r\nfn gauss_kernal(start: vec2i, radius: u32, a: f32) -> vec4f {\r\n    var sum = vec4f();\r\n    var coeff_sum = 0.0;\r\n    let r = i32(radius);\r\n    let start_depth = textureLoad(position_tex, start, 0).w;\r\n    for(var x: i32 = -r + 1; x < r; x++){\r\n        for(var y: i32 = -r + 1; y < r; y++){\r\n            let g = gauss(x,y,a);\r\n            let depth = textureLoad(position_tex, start + vec2i(x,y), 0).w;\r\n            if(depth + 1 > start_depth){\r\n                sum += g * textureLoad(color_tex, start + vec2i(x,y), 0);\r\n                coeff_sum += g;\r\n            }\r\n        }\r\n    }\r\n    return sum / coeff_sum;\r\n}\r\n\r\nfn luminance(color: vec4f) -> f32{\r\n    return color.x + color.y + color.z;\r\n}";
 
   // src/shaders/compute.wgpu
-  var compute_default = "@group(0) @binding(0)\r\nvar input_image : texture_2d<f32>;\r\n\r\n@group(0) @binding(1)\r\nvar output_image : texture_storage_2d<rgba8unorm, write>;\r\n\r\noverride dimx: u32;\r\noverride dimy: u32;\r\n\r\nstruct Settings {\r\n  output_size: vec2u,\r\n}\r\n\r\nfn reduce(a: vec4f, b: vec4f) -> vec4f {\r\n  return a+b;\r\n}\r\n\r\n@compute @workgroup_size(dimx, dimy)\r\nfn main(\r\n  @builtin(global_invocation_id)\r\n  global_id : vec3u,\r\n\r\n  @builtin(local_invocation_id)\r\n  local_id : vec3u,\r\n) {\r\n  let dims = textureDimensions(output_image);\r\n  if(local_id.x >= dims.x || local_id.y >= dims.y){\r\n    return;\r\n  }\r\n  var val = vec4f(0,0,0,0);\r\n  for(var x:u32 = 0; x < 2; x++){\r\n    for(var y:u32 = 0; y < 2; y++){\r\n      val = reduce(val, textureLoad(input_image, global_id.xy*2+vec2u(x,y), 0));\r\n    }\r\n  }\r\n  textureStore(output_image, global_id.xy, val/4.0);\r\n}";
+  var compute_default = "@group(0) @binding(0)\r\nvar input_image : texture_2d<f32>;\r\n\r\n@group(0) @binding(1)\r\nvar output_image : texture_storage_2d<rgba8unorm, write>;\r\n\r\noverride dimx: u32;\r\noverride dimy: u32;\r\n\r\nfn reduce(a: vec4f, b: vec4f) -> vec4f {\r\n  return vec4f(a.xyz+b.xyz,min(a.w,b.w));\r\n}\r\n\r\n@compute @workgroup_size(dimx, dimy)\r\nfn main(\r\n  @builtin(global_invocation_id)\r\n  global_id : vec3u,\r\n\r\n  @builtin(local_invocation_id)\r\n  local_id : vec3u,\r\n) {\r\n  let dims = textureDimensions(output_image);\r\n  if(global_id.x >= dims.x || global_id.y >= dims.y){\r\n    return;\r\n  }\r\n  var val = vec4f(0,0,0,1);\r\n  for(var x:u32 = 0; x < 2; x++){\r\n    for(var y:u32 = 0; y < 2; y++){\r\n      val = reduce(val, textureLoad(input_image, global_id.xy*2+vec2u(x,y), 0));\r\n    }\r\n  }\r\n  textureStore(output_image, global_id.xy, vec4f(val.xyz/4.0, val.w));\r\n}";
 
   // src/shaders/color.wgpu
-  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar tex_sampler: sampler; \r\n\r\n@group(1) @binding(2)\r\nvar diffuse_texture : texture_2d<f32>;\r\n\r\n@group(1) @binding(3)\r\nvar opacity_texture : texture_2d<f32>;\r\n\r\noverride has_opacity: bool;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) normal : vec3f,\r\n  @location(1) uv : vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.normal = normal;\r\n  output.uv = vec2(uv.x, 1-uv.y);\r\n  return output;\r\n}\r\n\r\nstruct FragmentOut {\r\n  @location(0) color: vec4f,\r\n  @location(1) position: vec4f,\r\n  @location(2) normal: vec4f,\r\n};\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> FragmentOut\r\n{\r\n  let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);\r\n  var opacity = color.w; \r\n  if(has_opacity){\r\n    opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;\r\n  }\r\n  if(opacity < 0.01){\r\n    discard;\r\n  }\r\n\r\n  /*let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;\r\n  let ambient_light = 0.5;\r\n  let lighted_color = color * (directional_light + ambient_light);\r\n*/\r\n  var frag = FragmentOut();\r\n  frag.color = vec4(color.xyz, opacity);\r\n  frag.normal = vec4f(fragData.normal,0.0);\r\n  frag.position = fragData.position;\r\n  return frag;\r\n}";
+  var color_default = "@group(0) @binding(0)\r\nvar<uniform> camera: mat4x4f;\r\n\r\n@group(0) @binding(1)\r\nvar tex_sampler: sampler; \r\n\r\n@group(1) @binding(2)\r\nvar diffuse_texture : texture_2d<f32>;\r\n\r\n@group(1) @binding(3)\r\nvar opacity_texture : texture_2d<f32>;\r\n\r\noverride has_opacity: bool;\r\n\r\nstruct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) world_position: vec3f,\r\n  @location(1) normal : vec3f,\r\n  @location(2) uv : vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec3f,\r\n               @location(1) normal: vec3f,\r\n               @location(2) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = (camera * vec4f(position, 1));\r\n  output.world_position = position;\r\n  output.normal = normal;\r\n  output.uv = vec2(uv.x, 1-uv.y);\r\n  return output;\r\n}\r\n\r\nstruct FragmentOut {\r\n  @location(0) color: vec4f,\r\n  @location(1) position: vec4f,\r\n  @location(2) normal: vec4f,\r\n};\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> FragmentOut\r\n{\r\n  let color = textureSample(diffuse_texture, tex_sampler, fragData.uv);\r\n  var opacity = color.w; \r\n  if(has_opacity){\r\n    opacity = textureSample(opacity_texture, tex_sampler, fragData.uv).w;\r\n  }\r\n  if(opacity < 0.01){\r\n    discard;\r\n  }\r\n\r\n  /*let directional_light = dot(fragData.normal, vec3(0.0,0.3,0.9))*0.5;\r\n  let ambient_light = 0.5;\r\n  let lighted_color = color * (directional_light + ambient_light);\r\n*/\r\n  var frag = FragmentOut();\r\n  frag.color = vec4(color.xyz, opacity);\r\n  frag.normal = vec4f(fragData.normal,0.0);\r\n  frag.position = vec4f(fragData.world_position.xyz, fragData.position.w);\r\n  return frag;\r\n}";
 
   // src/shaders/skybox.wgpu
   var skybox_default = "struct VertexOut {\r\n  @builtin(position) position : vec4f,\r\n  @location(0) uv: vec2f,\r\n}\r\n\r\n@vertex\r\nfn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOut\r\n{\r\n  var output : VertexOut;\r\n  output.position = vec4f(position, 1,1);\r\n  output.uv = uv;\r\n  return output;\r\n}\r\n\r\nstruct FragmentOut {\r\n  @location(0) color: vec4f,\r\n  @location(1) position: vec4f,\r\n  @location(2) normal: vec4f,\r\n};\r\n\r\n@fragment\r\nfn fragment_main(fragData: VertexOut) -> FragmentOut\r\n{\r\n  var frag = FragmentOut();\r\n  frag.color = vec4f(135.0/255.0,206.0/255.0, 235.0/255.0,1);\r\n  frag.position = vec4f(0,0,0,10000);\r\n  return frag;\r\n}\r\n";
+
+  // src/shaders/raytrace.wgpu
+  var raytrace_default = "struct LightSample {\r\n    data: vec4f,\r\n}\r\n\r\nstruct Settings {\r\n    dims: vec2u,\r\n    samples: u32,\r\n    reset: u32,\r\n    frame_count: u32,\r\n}\r\n\r\nstruct BVHNode {\r\n    min: vec4f, //.w = left, <0 = -tri_count\r\n    max: vec4f, //.w = right, <0 = tri_ptr (float elements)\r\n};\r\n\r\n@group(0) @binding(0)\r\nvar<uniform> settings: Settings;\r\n\r\n@group(0) @binding(1)\r\nvar<storage, read_write> light_accumulation: array<LightSample>;\r\n\r\n@group(0) @binding(2)\r\nvar position_tex: texture_2d<f32>;\r\n\r\n@group(0) @binding(3)\r\nvar normal_tex: texture_2d<f32>;\r\n\r\n@group(1) @binding(4)\r\nvar<storage, read> tree: array<BVHNode>;\r\n\r\n@group(1) @binding(5)\r\nvar<storage, read> triangles: array<f32>;\r\n\r\nvar<private> rng_seed: u32;\r\n\r\noverride dimx: u32 = 8;\r\noverride dimy: u32 = 8;\r\nconst TRIANGLE_SIZE = 9;\r\n\r\nstruct Triangle {\r\n    v0: vec3f,\r\n    v1: vec3f,\r\n    v2: vec3f,\r\n}\r\n\r\nstruct Gaussian {\r\n    dir: vec3f,\r\n    amplitude: vec3f,\r\n    sharpness: f32,\r\n}\r\n\r\nfn GaussEvaluate(g: Gaussian, dir: vec3f) -> vec3f {\r\n    return g.amplitude * exp(g.sharpness * (dot(dir, g.dir) - 1));\r\n}\r\n\r\nfn seed_rng(global_id: vec2u) {\r\n    rng_seed = global_id.x * 4096 + global_id.y * 4096 * 4096 + settings.frame_count;\r\n}\r\n\r\nfn pcg_hash(input: u32) -> u32 {\r\n    let state = input * 747796405u + 2891336453u;\r\n    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;\r\n    return (word >> 22u) ^ word;\r\n}\r\n\r\nfn rand_float() -> f32 {\r\n    rng_seed = pcg_hash(rng_seed);\r\n    return f32(rng_seed) / f32(0xffffffffu);\r\n}\r\n\r\nfn intersect_bvhleaf(o: vec3f, v: vec3f, node: BVHNode) -> bool {\r\n    let ct = u32(-node.min.w);\r\n    let ptr = u32(node.max.w);\r\n\r\n    for(var i:u32 = 0; i < ct; i++){\r\n        if(ray_tri_ptr_intersect(o, v, ptr + i * TRIANGLE_SIZE)){\r\n            return true;\r\n        }\r\n    }\r\n\r\n    return false;\r\n}\r\n\r\nfn raytrace_bvh(o: vec3f, v: vec3f) -> bool {\r\n    var stack = array<u32, 32>();\r\n    let inv_v = 1.0 / v;\r\n    let sign = vec3i(i32(v.x < 0), i32(v.y < 0), i32(v.z < 0));\r\n    var intersects = 0;\r\n    for(var stack_ptr = 0; stack_ptr >= 0;){\r\n        let node_idx = stack[stack_ptr];\r\n        let node = tree[node_idx];\r\n        if(fast_ray_cube_intersect(o, v, inv_v, sign, node.min.xyz, node.max.xyz)) {\r\n            if(node.min.w >= 0){ //internal node\r\n                stack[stack_ptr] = u32(node.min.w);\r\n                stack_ptr++;\r\n                stack[stack_ptr] = u32(node.max.w);\r\n            } else {\r\n                if(intersect_bvhleaf(o,v,node)){\r\n                    return true;\r\n                }\r\n                stack_ptr--;\r\n            }\r\n        } else {\r\n            stack_ptr--;\r\n        }\r\n    }\r\n    return false;\r\n}\r\n\r\n@compute @workgroup_size(dimx, dimy)\r\nfn main(\r\n    @builtin(global_invocation_id)\r\n    global_id: vec3u,\r\n\r\n    @builtin(local_invocation_id)\r\n    local_id: vec3u,\r\n) {\r\n    if(global_id.x > settings.dims.x || global_id.y > settings.dims.y){\r\n        return;\r\n    }\r\n\r\n    let pos = textureLoad(position_tex, global_id.xy, 0);\r\n    if(pos.w == 10000.0){\r\n        return;\r\n    }\r\n    let normal = textureLoad(normal_tex, global_id.xy, 0).xyz;\r\n\r\n\r\n    seed_rng(global_id.xy / vec2u(dimx, dimy));\r\n    //seed_rng(global_id.xy);\r\n\r\n    let light_dir = normalize(vec3f(0,0.3,1));\r\n    let intensity = 32.0;\r\n    let gauss = Gaussian(light_dir, vec3(intensity,intensity,intensity), 16.0);\r\n\r\n\r\n    var sample = light_accumulation[settings.dims.x * global_id.y + global_id.x];\r\n    if(settings.reset != 0){\r\n        sample.data = vec4f(0);\r\n    }\r\n\r\n    for(var i:u32 = 0; i < settings.samples; i++){\r\n        var sample_dir = normalize(vec3f(\r\n            rand_float() * 2.0 - 1.0,\r\n            rand_float() * 2.0 - 1.0,\r\n            rand_float() * 2.0 - 1.0,\r\n        ));\r\n        var norm_dot = dot(sample_dir, normal);\r\n        if(norm_dot < 0){\r\n            sample_dir = sample_dir - 2.0 * normal * norm_dot;\r\n            norm_dot = -norm_dot;\r\n        }\r\n        if(raytrace_bvh(pos.xyz + sample_dir * 0.01, sample_dir)){\r\n            sample.data += vec4f(0,0,0,1);\r\n        } else {\r\n            let g = GaussEvaluate(gauss, sample_dir);\r\n            sample.data += vec4f(g * norm_dot,1);\r\n        }\r\n    }\r\n\r\n    light_accumulation[settings.dims.x * global_id.y + global_id.x] = sample;\r\n}\r\n\r\n\r\n\r\n\r\n\r\n\r\nfn ray_tri_ptr_intersect(ray_origin: vec3f, ray_vec: vec3f, ptr: u32) -> bool {\r\n    let t = Triangle(\r\n        vec3f(triangles[ptr+0], triangles[ptr+1], triangles[ptr+2]),\r\n        vec3f(triangles[ptr+3], triangles[ptr+4], triangles[ptr+5]),\r\n        vec3f(triangles[ptr+6], triangles[ptr+7], triangles[ptr+8])\r\n    );\r\n    return ray_tri_intersect(ray_origin, ray_vec, t);\r\n}\r\n\r\nfn ray_tri_intersect(ray_origin: vec3f, ray_vec: vec3f, tri: Triangle) -> bool {\r\n    const EPSILON = 0.0000001;\r\n    let edge1 = tri.v1 - tri.v0;\r\n    let edge2 = tri.v2 - tri.v0;\r\n    let h = cross(ray_vec, edge2);\r\n    let a = dot(edge1, h);\r\n    if(a > -EPSILON && a < EPSILON){\r\n        return false;\r\n    }\r\n\r\n    let f = 1.0 / a;\r\n    let s = ray_origin - tri.v0;\r\n    let u = f * dot(s, h);\r\n\r\n    if(u < 0.0 || u > 1.0){\r\n        return false;\r\n    }\r\n\r\n    let q = cross(s, edge1);\r\n    let v = f * dot(ray_vec, q);\r\n\r\n    if(v < 0.0 || u + v > 1.0){\r\n        return false;\r\n    }\r\n\r\n    let t = f * dot(edge2, q);\r\n    if(t > EPSILON) {\r\n        return true;\r\n    } else {\r\n        return false;\r\n    }\r\n}\r\n\r\nfn fast_ray_cube_intersect(ray_origin: vec3f, ray_vec: vec3f, inv_ray_vec: vec3f, sign: vec3i, cube_min: vec3f, cube_max: vec3f) -> bool {\r\n    let bounds = array(cube_min, cube_max);\r\n\r\n    var tmin = (bounds[sign.x].x - ray_origin.x) * inv_ray_vec.x;\r\n    var tmax = (bounds[1-sign.x].x - ray_origin.x) * inv_ray_vec.x;\r\n    let tymin = (bounds[sign.y].y - ray_origin.y) * inv_ray_vec.y;\r\n    let tymax = (bounds[1-sign.y].y - ray_origin.y) * inv_ray_vec.y;\r\n\r\n    if( (tmin > tymax) || (tymin > tmax)) {\r\n        return false;\r\n    }\r\n\r\n    if(tymin > tmin) {\r\n        tmin = tymin;\r\n    }\r\n\r\n    if(tymax < tmax) {\r\n        tmax = tymax;\r\n    }\r\n    let tzmin = (bounds[sign.z].z - ray_origin.z) * inv_ray_vec.z;\r\n    let tzmax = (bounds[1-sign.z].z - ray_origin.z) * inv_ray_vec.z;\r\n\r\n    if( (tmin > tzmax) || (tzmin > tmax)) {\r\n        return false;\r\n    }\r\n\r\n    if(tzmin > tmin) {\r\n        tmin = tzmin;\r\n    }\r\n\r\n    if(tzmax < tmax) {\r\n        tmax = tzmax;\r\n    }\r\n\r\n    let t1 = 100000.0;\r\n    let t0 = 0.0;\r\n\r\n    return (tmin < t1) && (tmax > t0);\r\n}";
 
   // src/ShaderSrc.ts
   function compute_shader_src() {
@@ -2112,6 +2115,9 @@
   function postprocess_shader_src() {
     return postprocess_default;
   }
+  function raytrace_shader_src() {
+    return raytrace_default;
+  }
 
   // src/MergedBuffer.ts
   var FLOAT_SIZE = 4;
@@ -2123,28 +2129,35 @@
     index_size;
     vertex_cap;
     index_cap;
-    index_starts;
     vertex_buffer;
     index_buffer;
+    usage;
     device;
-    constructor(device, initial_size = 1024) {
+    constructor(device, flags = 0, initial_size = 1024) {
       if (initial_size < 128)
         initial_size = 128;
       this.device = device;
       this.merged_vertices = new Float32Array(initial_size);
       this.merged_indices = new Uint32Array(initial_size);
+      this.usage = GPUBufferUsage.COPY_DST | flags;
       this.vertex_buffer = this.device.createBuffer({
         size: FLOAT_SIZE * initial_size,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX
+        usage: GPUBufferUsage.VERTEX | this.usage
       });
       this.index_buffer = this.device.createBuffer({
         size: FLOAT_SIZE * initial_size,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDEX
+        usage: GPUBufferUsage.INDEX | this.usage
       });
       this.vertex_size = 0;
       this.index_size = 0;
       this.vertex_cap = initial_size;
       this.index_cap = initial_size;
+    }
+    vertices() {
+      return this.merged_vertices.subarray(0, this.vertex_size);
+    }
+    indices() {
+      return this.merged_indices.subarray(0, this.index_size);
     }
     add_geometry(vertices, indices) {
       indices = indices.slice();
@@ -2330,8 +2343,178 @@
     }
   };
 
+  // src/BVH.ts
+  var Triangle = class {
+    constructor(v0, v1, v2) {
+      this.v0 = v0;
+      this.v1 = v1;
+      this.v2 = v2;
+    }
+    center() {
+      return new Vec3(
+        (this.v0.x + this.v1.x + this.v2.x) / 3,
+        (this.v0.y + this.v1.y + this.v2.y) / 3,
+        (this.v0.z + this.v1.z + this.v2.z) / 3
+      );
+    }
+    min(axis) {
+      return Math.min(this.v0.at(axis), this.v1.at(axis), this.v2.at(axis));
+    }
+    max(axis) {
+      return Math.max(this.v0.at(axis), this.v1.at(axis), this.v2.at(axis));
+    }
+    extent(axis) {
+      return [this.min(axis), this.max(axis)];
+    }
+  };
+  var Vec3 = class {
+    constructor(x, y, z) {
+      this.x = x;
+      this.y = y;
+      this.z = z;
+    }
+    at(axis) {
+      if (axis == 0)
+        return this.x;
+      if (axis == 1)
+        return this.y;
+      if (axis == 2)
+        return this.z;
+      throw new Error("Err out of range");
+    }
+  };
+  var FlatBVHNode = class {
+    constructor(min_extent, max_extent, left, right) {
+      this.min_extent = min_extent;
+      this.max_extent = max_extent;
+      this.left = left;
+      this.right = right;
+    }
+  };
+  var BVHNode = class {
+    constructor(min_extent, max_extent, children) {
+      this.min_extent = min_extent;
+      this.max_extent = max_extent;
+      this.children = children;
+    }
+  };
+  var BVHLeaf = class {
+    constructor(min_extent, max_extent, children) {
+      this.min_extent = min_extent;
+      this.max_extent = max_extent;
+      this.children = children;
+    }
+  };
+  function geometry_data_to_triangles(verts, indices) {
+    const VERT_SIZE = 8;
+    let tris = [];
+    for (let i = 0; i < indices.length; i += 3) {
+      let i0 = indices[i] * VERT_SIZE;
+      let i1 = indices[i + 1] * VERT_SIZE;
+      let i2 = indices[i + 2] * VERT_SIZE;
+      tris.push(new Triangle(
+        new Vec3(verts[i0], verts[i0 + 1], verts[i0 + 2]),
+        new Vec3(verts[i1], verts[i1 + 1], verts[i1 + 2]),
+        new Vec3(verts[i2], verts[i2 + 1], verts[i2 + 2])
+      ));
+    }
+    return tris;
+  }
+  var BVH = class {
+    constructor(triangles) {
+      this.triangles = triangles;
+    }
+    extent_axis(tris, axis) {
+      return tris.reduce((prev, tri) => {
+        let ext = tri.extent(axis);
+        return [Math.min(prev[0], ext[0]), Math.max(prev[1], ext[1])];
+      }, [Infinity, -Infinity]);
+    }
+    extent(tris) {
+      let ext0 = this.extent_axis(tris, 0);
+      let ext1 = this.extent_axis(tris, 1);
+      let ext2 = this.extent_axis(tris, 2);
+      return [new Vec3(ext0[0], ext1[0], ext2[0]), new Vec3(ext0[1], ext1[1], ext2[1])];
+    }
+    make_bvh_node(tris) {
+      let extent = this.extent(tris);
+      if (tris.length < 6) {
+        return new BVHLeaf(extent[0], extent[1], tris);
+      }
+      let big_axis = 0;
+      for (let i = 1; i < 3; i++) {
+        if (extent[1].at(i) - extent[0].at(i) > extent[1].at(big_axis) - extent[0].at(big_axis)) {
+          big_axis = i;
+        }
+      }
+      tris.sort((a, b) => a.center().at(big_axis) - b.center().at(big_axis));
+      let midpoint = tris[tris.length / 2 | 0].center().at(big_axis);
+      let left = tris.filter((t) => t.center().at(big_axis) < midpoint);
+      let right = tris.filter((t) => t.center().at(big_axis) >= midpoint);
+      if (left.length == 0 || right.length == 0) {
+        return new BVHLeaf(extent[0], extent[1], tris);
+      }
+      return new BVHNode(extent[0], extent[1], [this.make_bvh_node(left), this.make_bvh_node(right)]);
+    }
+    build() {
+      return this.make_bvh_node(this.triangles);
+    }
+    build_buffer() {
+      let bvh = this.build();
+      let flat_tree = [];
+      let visit = (node) => {
+        if (node instanceof BVHNode) {
+          let flat_node = new FlatBVHNode(node.min_extent, node.max_extent, 0, 0);
+          let idx = flat_tree.length;
+          flat_tree.push(flat_node);
+          flat_node.left = visit(node.children[0]);
+          flat_node.right = visit(node.children[1]);
+          return idx;
+        } else {
+          let idx = flat_tree.length;
+          flat_tree.push(node);
+          return idx;
+        }
+      };
+      visit(bvh);
+      let visit2 = (node) => {
+        if (node instanceof BVHNode) {
+          return 1 + Math.max(visit2(node.children[0]), visit2(node.children[1]));
+        } else {
+          return 1;
+        }
+      };
+      console.log("Max height", visit2(bvh));
+      let tris_buffer = [];
+      let tree_buffer = flat_tree.flatMap((node, i) => {
+        if (node instanceof FlatBVHNode) {
+          return [node.min_extent.x, node.min_extent.y, node.min_extent.z, node.left, node.max_extent.x, node.max_extent.y, node.max_extent.z, node.right];
+        } else {
+          let ptr = tris_buffer.length;
+          for (let t of node.children) {
+            tris_buffer.push(
+              t.v0.x,
+              t.v0.y,
+              t.v0.z,
+              t.v1.x,
+              t.v1.y,
+              t.v1.z,
+              t.v2.x,
+              t.v2.y,
+              t.v2.z
+            );
+          }
+          return [node.min_extent.x, node.min_extent.y, node.min_extent.z, -node.children.length, node.max_extent.x, node.max_extent.y, node.max_extent.z, ptr];
+        }
+      });
+      return { tree: new Float32Array(tree_buffer), tris: new Float32Array(tris_buffer) };
+    }
+  };
+
   // src/App.ts
+  var VEC4_SIZE = 16;
   var FLOAT_SIZE2 = 4;
+  var U32_SIZE2 = 4;
   var App = class {
     constructor(device, context, res_x, res_y) {
       this.device = device;
@@ -2343,7 +2526,7 @@
       this.camera = this.make_camera();
       this.raster = this.setup_raster();
       this.mipmapper = new MipMaper(this.device);
-      ;
+      this.all_geometry = new MergedBufer(this.device, GPUBufferUsage.STORAGE);
     }
     camera;
     scene;
@@ -2352,7 +2535,16 @@
     clear_color = { r: 0, g: 0.5, b: 1, a: 1 };
     texture_cache = /* @__PURE__ */ new Map();
     forward_layout;
+    geometry_layout;
     bind_group_cache;
+    all_geometry;
+    settings_uniform;
+    raytrace_settings_uniform;
+    light_accumulation_buffer;
+    raytrace_dispatch_block = [8, 8];
+    raytrace_bind_bvh_layout;
+    dirty_shadows = false;
+    frame_count = 0;
     get_texture(texture) {
       if (!this.texture_cache.get(texture.data)) {
         let tex = this.device.createTexture({
@@ -2381,19 +2573,22 @@
       return { mat, buffer };
     }
     set_camera(mat) {
+      if (mat4_exports.equals(this.camera.mat, mat))
+        return;
       this.camera.mat = mat;
       this.device.queue.writeBuffer(this.camera.buffer, 0, new Float32Array(mat));
+      this.dirty_shadows = true;
     }
     add_mesh(mesh) {
       let vertices = new Float32Array(mesh.vertices.length / 3 * 8);
       let indices = new Uint32Array(mesh.indices);
       for (let i = 0; i < mesh.vertices.length / 3; i++) {
-        vertices[i * 8 + 0] = mesh.vertices[i * 3 + 0] / 50;
-        vertices[i * 8 + 1] = mesh.vertices[i * 3 + 2] / 50;
-        vertices[i * 8 + 2] = mesh.vertices[i * 3 + 1] / 50;
+        vertices[i * 8 + 0] = mesh.vertices[i * 3 + 0];
+        vertices[i * 8 + 1] = mesh.vertices[i * 3 + 2];
+        vertices[i * 8 + 2] = mesh.vertices[i * 3 + 1];
         vertices[i * 8 + 3] = mesh.normals[i * 3 + 0];
-        vertices[i * 8 + 4] = mesh.normals[i * 3 + 1];
-        vertices[i * 8 + 5] = mesh.normals[i * 3 + 2];
+        vertices[i * 8 + 4] = mesh.normals[i * 3 + 2];
+        vertices[i * 8 + 5] = mesh.normals[i * 3 + 1];
         vertices[i * 8 + 6] = mesh.uvs[i * 2 + 0];
         vertices[i * 8 + 7] = mesh.uvs[i * 2 + 1];
       }
@@ -2430,13 +2625,77 @@
         };
         this.raster.forward_diffuse_pass.geometries.push(geo);
       }
+      this.all_geometry.add_geometry(vertices, indices);
     }
     optimize_buffers() {
       this.optimize_pass_buffers(this.raster.forward_diffuse_opacity_pass);
       this.optimize_pass_buffers(this.raster.forward_diffuse_pass);
     }
+    build_bvh() {
+      let bvh = new BVH(geometry_data_to_triangles(this.all_geometry.vertices(), this.all_geometry.indices()));
+      let { tree, tris } = bvh.build_buffer();
+      const aligned_tree_size = Math.ceil(tree.byteLength / 256) * 256;
+      let buffer = this.device.createBuffer({
+        size: aligned_tree_size + tris.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      });
+      this.device.queue.writeBuffer(buffer, 0, tree);
+      this.device.queue.writeBuffer(buffer, aligned_tree_size, tris);
+      this.raster.postprocess_pass.geometries[0].bind_groups[0] = this.device.createBindGroup({
+        layout: this.geometry_layout,
+        entries: [
+          {
+            binding: 4,
+            resource: {
+              buffer,
+              size: tree.byteLength,
+              offset: 0
+            }
+          },
+          {
+            binding: 5,
+            resource: {
+              buffer,
+              size: tris.byteLength,
+              offset: aligned_tree_size
+            }
+          },
+          {
+            binding: 6,
+            resource: {
+              buffer: this.light_accumulation_buffer
+            }
+          }
+        ]
+      });
+      this.raster.raytrace_pass.bind_groups[1] = this.device.createBindGroup({
+        layout: this.raytrace_bind_bvh_layout,
+        entries: [
+          {
+            binding: 4,
+            resource: {
+              buffer,
+              size: tree.byteLength,
+              offset: 0
+            }
+          },
+          {
+            binding: 5,
+            resource: {
+              buffer,
+              size: tris.byteLength,
+              offset: aligned_tree_size
+            }
+          }
+        ]
+      });
+    }
     sort_materials(pass) {
       pass.geometries.sort((a, b) => a.bind_groups[0].label.localeCompare(b.bind_groups[0].label));
+    }
+    update_ray_data() {
+      this.device.queue.writeBuffer(this.raytrace_settings_uniform, 12, new Uint32Array([this.dirty_shadows ? 1 : 0, this.frame_count]));
+      this.dirty_shadows = false;
     }
     optimize_pass_buffers(pass) {
       this.sort_materials(pass);
@@ -2451,6 +2710,7 @@
       const forward_shader = this.device.createShaderModule({ code: color_shader_src(), label: "color shader" });
       const postprocess_shader = this.device.createShaderModule({ code: postprocess_shader_src(), label: "postprocess shader" });
       const skybox_shader = this.device.createShaderModule({ code: skybox_shader_src(), label: "skybox shader" });
+      const raytrace_shader = this.device.createShaderModule({ code: raytrace_shader_src(), label: "raytrace shader" });
       const full_screen_verts = new Float32Array([
         1,
         3,
@@ -2470,7 +2730,12 @@
         1,
         2
       ]);
+      this.settings_uniform = this.device.createBuffer({
+        size: FLOAT_SIZE2 * 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM
+      });
       let gbuffer_dimensions = [this.context.canvas.width, this.context.canvas.height];
+      this.device.queue.writeBuffer(this.settings_uniform, 0, new Uint32Array(gbuffer_dimensions));
       let depth_buffer = this.device.createTexture({
         size: gbuffer_dimensions,
         format: "depth32float",
@@ -2483,7 +2748,6 @@
         format: navigator.gpu.getPreferredCanvasFormat(),
         label: "gbuffer color"
       });
-      console.log("Canvas format ", navigator.gpu.getPreferredCanvasFormat());
       const gbuffer_position = this.device.createTexture({
         size: gbuffer_dimensions,
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
@@ -2496,15 +2760,25 @@
         format: "rgba16float",
         label: "gbuffer normal"
       });
+      const temp_geo_buffer = this.device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.STORAGE
+      });
+      this.light_accumulation_buffer = this.device.createBuffer({
+        size: gbuffer_dimensions[0] * gbuffer_dimensions[1] * VEC4_SIZE,
+        usage: GPUBufferUsage.STORAGE,
+        label: "light accumulation"
+      });
+      this.raytrace_settings_uniform = this.device.createBuffer({
+        size: 8 * U32_SIZE2,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      this.device.queue.writeBuffer(this.raytrace_settings_uniform, 0, new Uint32Array([...gbuffer_dimensions, 1, 1]));
       let filtering_tex_sampler = this.device.createSampler({
         addressModeU: "repeat",
         addressModeV: "repeat",
         magFilter: "linear",
         minFilter: "linear"
-      });
-      let nearest_tex_sampler = this.device.createSampler({
-        magFilter: "nearest",
-        minFilter: "nearest"
       });
       const uv_2d_vertex_layout = [
         {
@@ -2560,8 +2834,8 @@
           {
             binding: 0,
             visibility: GPUShaderStage.FRAGMENT,
-            sampler: {
-              type: "filtering"
+            buffer: {
+              type: "uniform"
             }
           },
           {
@@ -2590,6 +2864,33 @@
           }
         ],
         label: "postprocess bind group layout"
+      });
+      const postprocess_geometry_bind_group_layout = this.device.createBindGroupLayout({
+        entries: [
+          {
+            binding: 4,
+            //tree data
+            visibility: GPUShaderStage.FRAGMENT,
+            buffer: {
+              type: "read-only-storage"
+            }
+          },
+          {
+            binding: 5,
+            //triangles
+            visibility: GPUShaderStage.FRAGMENT,
+            buffer: {
+              type: "read-only-storage"
+            }
+          },
+          {
+            binding: 6,
+            visibility: GPUShaderStage.FRAGMENT,
+            buffer: {
+              type: "read-only-storage"
+            }
+          }
+        ]
       });
       const forward_bind_group_frame_layout = this.device.createBindGroupLayout({
         entries: [
@@ -2638,8 +2939,9 @@
         label: "forward bind group material layout"
       });
       this.forward_layout = forward_bind_group_material_layout;
+      this.geometry_layout = postprocess_geometry_bind_group_layout;
       const postprocess_layout = this.device.createPipelineLayout({
-        bindGroupLayouts: [postprocess_bind_group_layout],
+        bindGroupLayouts: [postprocess_bind_group_layout, postprocess_geometry_bind_group_layout],
         label: "postprocess layout"
       });
       const skybox_layout = this.device.createPipelineLayout({
@@ -2676,7 +2978,9 @@
         entries: [
           {
             binding: 0,
-            resource: nearest_tex_sampler
+            resource: {
+              buffer: this.settings_uniform
+            }
           },
           {
             binding: 1,
@@ -2769,7 +3073,7 @@
         },
         primitive: {
           topology: "triangle-list",
-          cullMode: "back"
+          cullMode: "none"
         },
         depthStencil: {
           format: "depth32float",
@@ -2795,7 +3099,7 @@
         },
         primitive: {
           topology: "triangle-list",
-          cullMode: "back"
+          cullMode: "none"
         },
         depthStencil: {
           format: "depth32float",
@@ -2809,6 +3113,46 @@
       const forward_diffuse_render_pipeline = this.device.createRenderPipeline(forward_diffuse_pipeline_descriptor);
       const forward_diffuse_opacity_render_pipeline = this.device.createRenderPipeline(forward_diffuse_opacity_pipeline_descriptor);
       const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
+      const raytrace_compute_pipeline = this.device.createComputePipeline({
+        layout: "auto",
+        compute: {
+          module: raytrace_shader,
+          entryPoint: "main",
+          constants: {
+            dimx: this.raytrace_dispatch_block[0],
+            dimy: this.raytrace_dispatch_block[1]
+          }
+        }
+      });
+      const raytrace_bind_layout = raytrace_compute_pipeline.getBindGroupLayout(0);
+      this.raytrace_bind_bvh_layout = raytrace_compute_pipeline.getBindGroupLayout(1);
+      const raytrace_bind_group = this.device.createBindGroup({
+        layout: raytrace_bind_layout,
+        entries: [
+          {
+            binding: 0,
+            resource: {
+              buffer: this.raytrace_settings_uniform
+            }
+          },
+          {
+            binding: 1,
+            resource: {
+              buffer: this.light_accumulation_buffer
+            }
+          },
+          {
+            binding: 2,
+            resource: gbuffer_position.createView()
+          },
+          {
+            binding: 3,
+            resource: gbuffer_normal.createView()
+          }
+        ],
+        label: "raytrace_settings_bind_group"
+      });
+      const raytrace_dispatch_size = [Math.ceil(gbuffer_dimensions[0] / this.raytrace_dispatch_block[0]), Math.ceil(gbuffer_dimensions[1] / this.raytrace_dispatch_block[1])];
       const forward_color_attachment = {
         view: gbuffer_color.createView(),
         loadOp: "clear",
@@ -2834,6 +3178,49 @@
       const postprocess_color_attachmet = "canvas";
       let fullscreen_buffer = new MergedBufer(this.device);
       let fullscreen_range = fullscreen_buffer.add_geometry(full_screen_verts, fullscreen_indices);
+      let temp_geo_bind = this.device.createBindGroup({
+        layout: this.geometry_layout,
+        entries: [
+          {
+            binding: 4,
+            resource: {
+              buffer: temp_geo_buffer,
+              size: 32
+            }
+          },
+          {
+            binding: 5,
+            resource: {
+              buffer: temp_geo_buffer,
+              size: 32
+            }
+          },
+          {
+            binding: 6,
+            resource: {
+              buffer: this.light_accumulation_buffer
+            }
+          }
+        ]
+      });
+      const raytrace_bind_scene_group = this.device.createBindGroup({
+        layout: this.raytrace_bind_bvh_layout,
+        entries: [
+          {
+            binding: 4,
+            resource: {
+              buffer: temp_geo_buffer
+            }
+          },
+          {
+            binding: 5,
+            resource: {
+              buffer: temp_geo_buffer
+            }
+          }
+        ],
+        label: "raytrace geo bind group"
+      });
       return {
         forward_diffuse_pass: {
           shader: forward_shader,
@@ -2875,13 +3262,25 @@
           vertex_size: uv_2d_vertex_layout[0].arrayStride,
           geometries: [{
             range: fullscreen_range,
-            bind_groups: []
+            bind_groups: [temp_geo_bind]
           }],
           geometry_buffer: fullscreen_buffer,
           color_attachments: [postprocess_color_attachmet]
         },
+        raytrace_pass: {
+          shader: raytrace_shader,
+          pipeline: raytrace_compute_pipeline,
+          bind_groups: [raytrace_bind_group, raytrace_bind_scene_group],
+          dispatch_size: raytrace_dispatch_size
+        },
         depth_buffer
       };
+    }
+    update_settings(time) {
+      this.device.queue.writeBuffer(this.settings_uniform, 8, new Float32Array([time]));
+    }
+    set_sample_count(count) {
+      this.device.queue.writeBuffer(this.raytrace_settings_uniform, 8, new Uint32Array([count]));
     }
     verify_attachments(passes) {
       for (let i = 1; i < passes.length; i++) {
@@ -2932,6 +3331,13 @@
       }
       return ret;
     }
+    encode_compute_pass(pass, encoder) {
+      const compute_pass = encoder.beginComputePass();
+      compute_pass.setPipeline(pass.pipeline);
+      pass.bind_groups.forEach((g, i) => compute_pass.setBindGroup(i, g));
+      compute_pass.dispatchWorkgroups(...pass.dispatch_size);
+      compute_pass.end();
+    }
     encode_render_passes(passes, encoder) {
       const pass_descriptor = this.make_pass_descriptor(passes);
       let tris_rendered = 0;
@@ -2960,12 +3366,15 @@
       pass_encoder.end();
     }
     draw_raster() {
+      this.frame_count++;
+      this.update_ray_data();
       const command_encoder = this.device.createCommandEncoder();
       this.encode_render_passes([
         this.raster.forward_diffuse_pass,
         this.raster.forward_diffuse_opacity_pass,
         this.raster.skybox_pass
       ], command_encoder);
+      this.encode_compute_pass(this.raster.raytrace_pass, command_encoder);
       this.encode_render_passes([
         this.raster.postprocess_pass
       ], command_encoder);
@@ -2983,6 +3392,7 @@
     pitch = 0;
     yaw = 0;
     constructor() {
+      this.yaw = 3;
       this.keymap = /* @__PURE__ */ new Map();
       this.pos = vec3_exports.fromValues(20, 20, 20);
       document.addEventListener("keydown", (ev) => {
@@ -3125,13 +3535,13 @@
     const app = new App(device, context, RES_X, RES_Y);
     const perspective2 = mat4_exports.create();
     mat4_exports.perspective(perspective2, Math.PI / 2, RES_X / RES_Y, 0.1, null);
-    load_json_model("Windfall").then((meshes) => {
+    load_json_model("Airport").then((meshes) => {
       meshes.forEach((mesh) => {
-        if (mesh.indices.length > 0) {
-          app.add_mesh(mesh);
-        }
+        app.add_mesh(mesh);
       });
       app.optimize_buffers();
+      app.build_bvh();
+      app.set_sample_count(1);
     });
     const camera = new Camera();
     let frame_count = 0;
@@ -3143,10 +3553,11 @@
       const view = camera.view();
       mat4_exports.multiply(mvp, perspective2, view);
       app.set_camera(mvp);
+      app.update_settings(performance.now() / 1e4);
       app.draw_raster();
       frame_count++;
-      if (frame_count % 300 == 0) {
-        console.log("FPS ", 300 / ((performance.now() - last_time) / 1e3));
+      if (frame_count % 100 == 0) {
+        console.log("FPS ", 100 / ((performance.now() - last_time) / 1e3));
         last_time = performance.now();
       }
     };

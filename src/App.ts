@@ -1,13 +1,14 @@
-import { mat4, vec3 } from "gl-matrix";
+import { glMatrix, mat4, vec3 } from "gl-matrix";
 import { Scene } from "./scene";
-import { color_shader_src, compute_shader_src, postprocess_shader_src, shadow_shader_src, skybox_shader_src } from "./ShaderSrc";
+import { color_shader_src, compute_shader_src, postprocess_shader_src, raytrace_shader_src, shadow_shader_src, skybox_shader_src } from "./ShaderSrc";
 import { Material, Mesh, Texture } from "./ModelLoad";
 import { DrawableRange, MergedBufer, Range } from "./MergedBuffer";
 import { BindGroupCache } from "./BindGroupCache";
 import { MipMaper } from "./MipMapper";
+import { BVH, geometry_data_to_triangles } from "./BVH";
 // import { Mesh, OBJ } from "webgl-obj-loader";
 
-const VEC_SIZE = 4;
+const VEC4_SIZE = 16;
 const VEC_ALIGN = 16;
 const FLOAT_SIZE = 4;
 const U32_SIZE = 4;
@@ -30,9 +31,17 @@ type RenderPass = {
     depth_attachment?: GPURenderPassDepthStencilAttachment
 }
 
+type ComputePass = {
+    shader: GPUShaderModule,
+    pipeline: GPUComputePipeline,
+    bind_groups: GPUBindGroup[],
+    dispatch_size: [number, number],
+}
+
 type RasterData = {
     depth_buffer: GPUTexture
 
+    raytrace_pass: ComputePass;
     forward_diffuse_pass: RenderPass;
     forward_diffuse_opacity_pass: RenderPass;
     skybox_pass: RenderPass;
@@ -44,11 +53,6 @@ type Camera = {
     buffer: GPUBuffer;
 }
 
-type RawMesh = {
-    vertices: number[]
-    
-}
-
 export class App {
     private camera: Camera;
     public scene: Scene;
@@ -58,14 +62,24 @@ export class App {
     private clear_color = { r: 0.0, g: 0.5, b: 1.0, a: 1.0 };
     private texture_cache: Map<ImageBitmap, {tex: GPUTexture, view: GPUTextureView}> = new Map()
     private forward_layout: GPUBindGroupLayout;
+    private geometry_layout: GPUBindGroupLayout;
     private bind_group_cache: BindGroupCache;
+    private all_geometry: MergedBufer;
+    private settings_uniform: GPUBuffer;
+    private raytrace_settings_uniform: GPUBuffer;
+    private light_accumulation_buffer: GPUBuffer;
+    private raytrace_dispatch_block = [8,8];
+    private raytrace_bind_bvh_layout: GPUBindGroupLayout;
+    private dirty_shadows: boolean = false;
+    frame_count: number = 0;
 
     constructor(private device: GPUDevice, private context: GPUCanvasContext, private res_x: number, private res_y: number){   
         this.scene = new Scene();
         this.bind_group_cache = new BindGroupCache(device);
         this.camera = this.make_camera();
         this.raster = this.setup_raster();
-        this.mipmapper = new MipMaper(this.device);;
+        this.mipmapper = new MipMaper(this.device);
+        this.all_geometry = new MergedBufer(this.device, GPUBufferUsage.STORAGE);
     }
 
     private get_texture(texture: Texture) {
@@ -102,28 +116,28 @@ export class App {
     }
 
     set_camera(mat: mat4) {
+        if(mat4.equals(this.camera.mat, mat)) return;
         this.camera.mat = mat;
         this.device.queue.writeBuffer(this.camera.buffer, 0, new Float32Array(mat));
+        this.dirty_shadows = true;
     }
 
     add_mesh(mesh: Mesh) {
         let vertices = new Float32Array(mesh.vertices.length/3 * 8);
         let indices = new Uint32Array(mesh.indices);
         for(let i = 0; i < mesh.vertices.length/3; i++){
-            vertices[i*8+0] = mesh.vertices[i*3+0]/50
-            vertices[i*8+1] = mesh.vertices[i*3+2]/50
-            vertices[i*8+2] = mesh.vertices[i*3+1]/50
+            vertices[i*8+0] = mesh.vertices[i*3+0]
+            vertices[i*8+1] = mesh.vertices[i*3+2]
+            vertices[i*8+2] = mesh.vertices[i*3+1]
             vertices[i*8+3] = mesh.normals[i*3+0]
-            vertices[i*8+4] = mesh.normals[i*3+1]
-            vertices[i*8+5] = mesh.normals[i*3+2]
+            vertices[i*8+4] = mesh.normals[i*3+2]
+            vertices[i*8+5] = mesh.normals[i*3+1]
             vertices[i*8+6] = mesh.uvs[i*2+0]
             vertices[i*8+7] = mesh.uvs[i*2+1];
         }
 
         let diffuse = this.get_texture(mesh.material.diffuse);
         
-        console.log(diffuse.tex.width, diffuse.tex.height);
-
         let bind_group;
         let opacity = mesh.material.opacity ? this.get_texture(mesh.material.opacity) : diffuse;
 
@@ -160,6 +174,7 @@ export class App {
             }
             this.raster.forward_diffuse_pass.geometries.push(geo);
         }
+        this.all_geometry.add_geometry(vertices, indices);
     }
 
     optimize_buffers(){
@@ -167,8 +182,78 @@ export class App {
         this.optimize_pass_buffers(this.raster.forward_diffuse_pass);
     }
 
+    build_bvh(){
+        let bvh = new BVH(geometry_data_to_triangles(this.all_geometry.vertices(), this.all_geometry.indices()));
+        let {tree, tris} = bvh.build_buffer();
+
+        const aligned_tree_size = Math.ceil(tree.byteLength / 256) * 256;
+
+        let buffer = this.device.createBuffer({
+            size: aligned_tree_size + tris.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        })
+
+        this.device.queue.writeBuffer(buffer, 0, tree);
+        this.device.queue.writeBuffer(buffer, aligned_tree_size, tris);
+
+        this.raster.postprocess_pass.geometries[0].bind_groups[0] = this.device.createBindGroup({
+            layout: this.geometry_layout,
+            entries: [
+                {
+                    binding: 4,
+                    resource: {
+                        buffer: buffer,
+                        size: tree.byteLength,
+                        offset: 0
+                    }
+                },
+                {
+                    binding: 5,
+                    resource: {
+                        buffer: buffer,
+                        size: tris.byteLength,
+                        offset: aligned_tree_size
+                    }
+                },
+                {
+                    binding: 6,
+                    resource: {
+                        buffer: this.light_accumulation_buffer,
+                    }
+                }
+            ]
+        })
+
+        this.raster.raytrace_pass.bind_groups[1] = this.device.createBindGroup({
+            layout: this.raytrace_bind_bvh_layout,
+            entries: [
+                {
+                    binding: 4,
+                    resource: {
+                        buffer: buffer,
+                        size: tree.byteLength,
+                        offset: 0
+                    }
+                },
+                {
+                    binding: 5,
+                    resource: {
+                        buffer: buffer,
+                        size: tris.byteLength,
+                        offset: aligned_tree_size
+                    }
+                },
+            ]
+        })
+    }
+
     private sort_materials(pass: RenderPass){
         pass.geometries.sort((a,b)=>a.bind_groups[0].label.localeCompare((b.bind_groups[0].label)));
+    }
+
+    private update_ray_data(){
+        this.device.queue.writeBuffer(this.raytrace_settings_uniform, 12, new Uint32Array([this.dirty_shadows ? 1 : 0, this.frame_count]));
+        this.dirty_shadows = false;
     }
 
     private optimize_pass_buffers(pass: RenderPass){
@@ -185,7 +270,8 @@ export class App {
         const forward_shader = this.device.createShaderModule({code: color_shader_src(), label: "color shader"})
         const postprocess_shader = this.device.createShaderModule({code: postprocess_shader_src(), label: "postprocess shader"})
         const skybox_shader = this.device.createShaderModule({code: skybox_shader_src(), label: "skybox shader"})
-        
+        const raytrace_shader = this.device.createShaderModule({code: raytrace_shader_src(), label: "raytrace shader"})
+
         const full_screen_verts = new Float32Array([
             1,3,1,-1,
             -3,-1,-1,1,
@@ -195,8 +281,16 @@ export class App {
         const fullscreen_indices = new Uint32Array([
             0,1,2
         ])
+    
+        this.settings_uniform = this.device.createBuffer({
+            size: FLOAT_SIZE*4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.UNIFORM
+        })
+
 
         let gbuffer_dimensions = [this.context.canvas.width, this.context.canvas.height]
+
+        this.device.queue.writeBuffer(this.settings_uniform, 0, new Uint32Array(gbuffer_dimensions));
 
         let depth_buffer = this.device.createTexture({
             size: gbuffer_dimensions,
@@ -212,8 +306,6 @@ export class App {
             label: "gbuffer color"
         })
 
-        console.log("Canvas format ", navigator.gpu.getPreferredCanvasFormat());
-
         const gbuffer_position = this.device.createTexture({
             size: gbuffer_dimensions,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
@@ -228,6 +320,24 @@ export class App {
             label: "gbuffer normal"
         })
 
+        const temp_geo_buffer = this.device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.STORAGE,
+        })
+
+        this.light_accumulation_buffer = this.device.createBuffer({
+            size: gbuffer_dimensions[0] * gbuffer_dimensions[1] * VEC4_SIZE,
+            usage: GPUBufferUsage.STORAGE,
+            label: "light accumulation",
+        })
+
+        this.raytrace_settings_uniform = this.device.createBuffer({
+            size: 8 * U32_SIZE,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        this.device.queue.writeBuffer(this.raytrace_settings_uniform, 0, new Uint32Array([...gbuffer_dimensions, 1, 1]))
+
         let filtering_tex_sampler = this.device.createSampler({
             addressModeU: "repeat",
             addressModeV: "repeat",
@@ -235,11 +345,6 @@ export class App {
             minFilter: "linear",
         })
 
-        let nearest_tex_sampler = this.device.createSampler({
-            magFilter: "nearest",
-            minFilter: "nearest"
-        })
-            
         const uv_2d_vertex_layout: GPUVertexBufferLayout[] = [
             {
                 attributes: [
@@ -293,8 +398,8 @@ export class App {
                 {
                     binding: 0,
                     visibility: GPUShaderStage.FRAGMENT,
-                    sampler: {
-                        type: "filtering"
+                    buffer: {
+                        type: "uniform"
                     }
                 },
                 {
@@ -323,6 +428,33 @@ export class App {
                 }
             ],
             label: "postprocess bind group layout",
+        });
+
+        const postprocess_geometry_bind_group_layout = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 4, //tree data
+                    visibility: GPUShaderStage.FRAGMENT,
+                    buffer: {
+                        type: "read-only-storage",
+
+                    }
+                },
+                {
+                    binding: 5, //triangles
+                    visibility: GPUShaderStage.FRAGMENT,
+                    buffer: {
+                        type: "read-only-storage"
+                    }
+                },
+                {
+                    binding: 6,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    buffer: {
+                        type: "read-only-storage"
+                    }
+                }
+            ]
         })
     
         const forward_bind_group_frame_layout = this.device.createBindGroupLayout({
@@ -370,9 +502,10 @@ export class App {
         })
 
         this.forward_layout = forward_bind_group_material_layout;
+        this.geometry_layout = postprocess_geometry_bind_group_layout;
 
         const postprocess_layout = this.device.createPipelineLayout({
-            bindGroupLayouts: [postprocess_bind_group_layout],
+            bindGroupLayouts: [postprocess_bind_group_layout, postprocess_geometry_bind_group_layout],
             label: "postprocess layout"
         })
 
@@ -412,7 +545,9 @@ export class App {
             entries: [
                 {
                     binding: 0,
-                    resource: nearest_tex_sampler
+                    resource: {
+                        buffer: this.settings_uniform
+                    }
                 },
                 {
                     binding: 1,
@@ -550,12 +685,53 @@ export class App {
             layout: forward_layout,
             label: "forward pipeline descriptor",
         };
-
     
         const postprocess_render_pipeline = this.device.createRenderPipeline(postprocess_pipeline_descriptor);
         const forward_diffuse_render_pipeline = this.device.createRenderPipeline(forward_diffuse_pipeline_descriptor);
         const forward_diffuse_opacity_render_pipeline = this.device.createRenderPipeline(forward_diffuse_opacity_pipeline_descriptor);
         const skybox_render_pipeline = this.device.createRenderPipeline(skybox_pipeline_descriptor);
+        const raytrace_compute_pipeline = this.device.createComputePipeline({
+            layout: "auto",
+            compute: {
+                module: raytrace_shader,
+                entryPoint: "main",
+                constants: {
+                    dimx: this.raytrace_dispatch_block[0],
+                    dimy: this.raytrace_dispatch_block[1],
+                }
+            }
+        });
+
+        const raytrace_bind_layout = raytrace_compute_pipeline.getBindGroupLayout(0);
+        this.raytrace_bind_bvh_layout = raytrace_compute_pipeline.getBindGroupLayout(1);
+        const raytrace_bind_group = this.device.createBindGroup({
+            layout: raytrace_bind_layout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.raytrace_settings_uniform
+                    }
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.light_accumulation_buffer
+                    }
+                },
+                {
+                    binding: 2,
+                    resource: gbuffer_position.createView()
+                },
+                {
+                    binding: 3,
+                    resource: gbuffer_normal.createView()
+                }
+            ],
+            label: "raytrace_settings_bind_group"
+        });
+        
+        const raytrace_dispatch_size: [number, number] = [Math.ceil(gbuffer_dimensions[0]/this.raytrace_dispatch_block[0]), Math.ceil(gbuffer_dimensions[1]/this.raytrace_dispatch_block[1])]
 
         const forward_color_attachment: GPURenderPassColorAttachment = {
             view: gbuffer_color.createView(),
@@ -584,6 +760,54 @@ export class App {
 
         let fullscreen_buffer = new MergedBufer(this.device);
         let fullscreen_range = fullscreen_buffer.add_geometry(full_screen_verts, fullscreen_indices);
+
+
+        
+
+        let temp_geo_bind = this.device.createBindGroup({
+            layout: this.geometry_layout,
+            entries: [
+                {
+                    binding: 4,
+                    resource: {
+                        buffer: temp_geo_buffer,
+                        size: 32
+                    }
+                },
+                {
+                    binding: 5,
+                    resource: {
+                        buffer: temp_geo_buffer,
+                        size: 32
+                    }
+                },
+                {
+                    binding: 6,
+                    resource: {
+                        buffer: this.light_accumulation_buffer
+                    }
+                }
+            ]
+        })
+
+        const raytrace_bind_scene_group = this.device.createBindGroup({
+            layout: this.raytrace_bind_bvh_layout,
+            entries: [
+                {
+                    binding: 4,
+                    resource: {
+                        buffer: temp_geo_buffer,
+                    }
+                },
+                {
+                    binding: 5,
+                    resource: {
+                        buffer: temp_geo_buffer
+                    }
+                }
+            ],
+            label: "raytrace geo bind group"
+        })
 
         return { 
             forward_diffuse_pass: {
@@ -626,13 +850,27 @@ export class App {
                 vertex_size: uv_2d_vertex_layout[0].arrayStride,
                 geometries: [{
                     range: fullscreen_range,
-                    bind_groups: []
+                    bind_groups: [temp_geo_bind]
                 }],
                 geometry_buffer: fullscreen_buffer,
                 color_attachments: [postprocess_color_attachmet]
             },
+            raytrace_pass: {
+                shader: raytrace_shader,
+                pipeline: raytrace_compute_pipeline,
+                bind_groups: [raytrace_bind_group, raytrace_bind_scene_group],
+                dispatch_size: raytrace_dispatch_size,
+            },
             depth_buffer: depth_buffer,
         }
+    }
+
+    update_settings(time: number){
+        this.device.queue.writeBuffer(this.settings_uniform, 8, new Float32Array([time]));
+    }
+
+    set_sample_count(count: number){
+        this.device.queue.writeBuffer(this.raytrace_settings_uniform, 8, new Uint32Array([count]));
     }
 
     private verify_attachments(passes: RenderPass[]){
@@ -685,6 +923,14 @@ export class App {
         }
         return ret;
     }
+    private encode_compute_pass(pass: ComputePass, encoder: GPUCommandEncoder){
+        const compute_pass = encoder.beginComputePass();
+
+        compute_pass.setPipeline(pass.pipeline);
+        pass.bind_groups.forEach((g,i)=>compute_pass.setBindGroup(i, g));
+        compute_pass.dispatchWorkgroups(...pass.dispatch_size);
+        compute_pass.end();
+    }
 
     private encode_render_passes(passes: RenderPass[], encoder: GPUCommandEncoder) {
         const pass_descriptor = this.make_pass_descriptor(passes);
@@ -714,15 +960,11 @@ export class App {
         });
         
         pass_encoder.end();
-        // console.log(draw_calls, tris_rendered, bind_groups_bound);
-    }
-
-    private sort_triangles() {
-        this.raster.forward_diffuse_pass.geometry_buffer;
     }
 
     draw_raster() {
-        this.sort_triangles();
+        this.frame_count++;
+        this.update_ray_data();
         const command_encoder = this.device.createCommandEncoder();
         
         this.encode_render_passes([
@@ -730,6 +972,8 @@ export class App {
             this.raster.forward_diffuse_opacity_pass, 
             this.raster.skybox_pass,
         ], command_encoder);
+
+        this.encode_compute_pass(this.raster.raytrace_pass, command_encoder);
 
         this.encode_render_passes([
             this.raster.postprocess_pass

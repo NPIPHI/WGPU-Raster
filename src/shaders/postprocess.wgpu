@@ -1,5 +1,19 @@
+struct Settings {
+    dims: vec2u,
+    time: f32,
+};
+
+struct BVHNode {
+    min: vec4f, //.w = left, <0 = -tri_count
+    max: vec4f, //.w = right, <0 = tri_ptr (float elements)
+};
+
+struct LightSample {
+    data: vec4f,
+}
+
 @group(0) @binding(0)
-var tex_sampler: sampler;
+var<uniform> settings: Settings;
 
 @group(0) @binding(1)
 var color_tex: texture_2d<f32>;
@@ -9,6 +23,17 @@ var position_tex: texture_2d<f32>;
 
 @group(0) @binding(3)
 var normal_tex: texture_2d<f32>;
+
+@group(1) @binding(4)
+var<storage, read> tree: array<BVHNode>;
+
+@group(1) @binding(5)
+var<storage, read> triangles: array<f32>;
+
+@group(1) @binding(6)
+var<storage, read> light_accumulation: array<LightSample>;
+
+var<private> rng_state: u32;
 
 struct VertexOut {
   @builtin(position) position : vec4f,
@@ -25,6 +50,324 @@ fn vertex_main(@location(0) position: vec2f, @location(1) uv: vec2f) -> VertexOu
   output.uv = uv;
   return output;
 }
+
+
+override kernalx: u32 = 4;
+override kernaly: u32 = 4;
+
+const WATER_BLUE = vec4f(0.9,0.9,1.3,1);
+const VERTEX_SIZE = 8;
+const TRIANGLE_SIZE = 9;
+const RNG_A:u32 = 48271;
+const RNG_M:u32 = 2147483647;
+
+struct Triangle {
+    v0: vec3f,
+    v1: vec3f,
+    v2: vec3f,
+}
+
+struct Gaussian {
+    dir: vec3f,
+    amplitude: vec3f,
+    sharpness: f32,
+}
+
+fn GaussEvaluate(g: Gaussian, dir: vec3f) -> vec3f {
+    return g.amplitude * exp(g.sharpness * (dot(dir, g.dir) - 1));
+}
+
+fn seed_rand(a: f32, b: f32, c: f32) {
+    rng_state = u32(a * 1000 + b * 10000000 + c * 1000000000);
+}
+
+fn rand() -> f32 {
+    rng_state = (RNG_A * rng_state) % RNG_M;
+    return f32(rng_state % 0xffff) / f32(0xffff);
+}
+
+fn fast_ray_cube_intersect2(ray_origin: vec3f, ray_vec: vec3f, inv_ray_vec: vec3f, cube_min: vec3f, cube_max: vec3f) -> bool {
+    let t1 = (cube_min - ray_origin) * inv_ray_vec;
+    let t2 = (cube_max - ray_origin) * inv_ray_vec;
+    let tmin = min(t1,t2);
+    let tmax = max(t1,t2);
+
+    return max(max(tmin.x, tmin.y), tmin.z) <= min(min(tmax.x, tmax.y), tmax.z);
+}
+
+fn fast_ray_cube_intersect(ray_origin: vec3f, ray_vec: vec3f, inv_ray_vec: vec3f, sign: vec3i, cube_min: vec3f, cube_max: vec3f) -> bool {
+    let bounds = array(cube_min, cube_max);
+
+    var tmin = (bounds[sign.x].x - ray_origin.x) * inv_ray_vec.x;
+    var tmax = (bounds[1-sign.x].x - ray_origin.x) * inv_ray_vec.x;
+    let tymin = (bounds[sign.y].y - ray_origin.y) * inv_ray_vec.y;
+    let tymax = (bounds[1-sign.y].y - ray_origin.y) * inv_ray_vec.y;
+
+    if( (tmin > tymax) || (tymin > tmax)) {
+        return false;
+    }
+
+    if(tymin > tmin) {
+        tmin = tymin;
+    }
+
+    if(tymax < tmax) {
+        tmax = tymax;
+    }
+    let tzmin = (bounds[sign.z].z - ray_origin.z) * inv_ray_vec.z;
+    let tzmax = (bounds[1-sign.z].z - ray_origin.z) * inv_ray_vec.z;
+
+    if( (tmin > tzmax) || (tzmin > tmax)) {
+        return false;
+    }
+
+    if(tzmin > tmin) {
+        tmin = tzmin;
+    }
+
+    if(tzmax < tmax) {
+        tmax = tzmax;
+    }
+
+    let t1 = 100000.0;
+    let t0 = 0.0;
+
+    return (tmin < t1) && (tmax > t0);
+}
+
+fn ray_cube_interset(ray_origin: vec3f, ray_vec: vec3f, cube_min: vec3f, cube_max: vec3f) -> bool {
+    var tmin = 0.0;
+    var tmax = 0.0;
+    var tymin = 0.0;
+    var tymax = 0.0;
+    var tzmin = 0.0;
+    var tzmax = 0.0;
+    if (ray_vec.x >= 0) {
+        tmin = (cube_min.x - ray_origin.x) / ray_vec.x;
+        tmax = (cube_max.x - ray_origin.x) / ray_vec.x;
+    } else {
+        tmin = (cube_max.x - ray_origin.x) / ray_vec.x;
+        tmax = (cube_min.x - ray_origin.x) / ray_vec.x;
+    }
+    if (ray_vec.y >= 0) {
+        tymin = (cube_min.y - ray_origin.y) / ray_vec.y;
+        tymax = (cube_max.y - ray_origin.y) / ray_vec.y;
+    }
+    else {
+        tymin = (cube_max.y - ray_origin.y) / ray_vec.y;
+        tymax = (cube_min.y - ray_origin.y) / ray_vec.y;
+    }
+    if ( (tmin > tymax) || (tymin > tmax) ) {
+        return false;
+    }
+    if (tymin > tmin){
+        tmin = tymin;
+    }
+    if (tymax < tmax){
+        tmax = tymax;
+    }
+    if (ray_vec.z >= 0) {
+        tzmin = (cube_min.z - ray_origin.z) / ray_vec.z;
+        tzmax = (cube_max.z - ray_origin.z) / ray_vec.z;
+    } else {
+        tzmin = (cube_max.z - ray_origin.z) / ray_vec.z;
+        tzmax = (cube_min.z - ray_origin.z) / ray_vec.z;
+    }
+    if ( (tmin > tzmax) || (tzmin > tmax) ) {
+        return false;
+    }
+    if (tzmin > tmin) {
+        tmin = tzmin;
+    }
+    if (tzmax < tmax) {
+        tmax = tzmax;
+    }
+    let t1 = 100000.0;
+    let t0 = 0.0;
+    return ( (tmin < t1) && (tmax > t0) );
+}
+
+fn ray_tri_intersect(ray_origin: vec3f, ray_vec: vec3f, tri: Triangle) -> bool {
+    const EPSILON = 0.0000001;
+    let edge1 = tri.v1 - tri.v0;
+    let edge2 = tri.v2 - tri.v0;
+    let h = cross(ray_vec, edge2);
+    let a = dot(edge1, h);
+    if(a > -EPSILON && a < EPSILON){
+        return false;
+    }
+
+    let f = 1.0 / a;
+    let s = ray_origin - tri.v0;
+    let u = f * dot(s, h);
+
+    if(u < 0.0 || u > 1.0){
+        return false;
+    }
+
+    let q = cross(s, edge1);
+    let v = f * dot(ray_vec, q);
+
+    if(v < 0.0 || u + v > 1.0){
+        return false;
+    }
+
+    let t = f * dot(edge2, q);
+    if(t > EPSILON) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+fn ray_tri_ptr_intersect(ray_origin: vec3f, ray_vec: vec3f, ptr: u32) -> bool {
+    let t = Triangle(
+        vec3f(triangles[ptr+0], triangles[ptr+1], triangles[ptr+2]),
+        vec3f(triangles[ptr+3], triangles[ptr+4], triangles[ptr+5]),
+        vec3f(triangles[ptr+6], triangles[ptr+7], triangles[ptr+8])
+    );
+    return ray_tri_intersect(ray_origin, ray_vec, t);
+}
+
+fn intersect_bvhleaf(o: vec3f, v: vec3f, node: BVHNode) -> bool {
+    let ct = u32(-node.min.w);
+    let ptr = u32(node.max.w);
+
+    for(var i:u32 = 0; i < ct; i++){
+        if(ray_tri_ptr_intersect(o, v, ptr + i * TRIANGLE_SIZE)){
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn raytrace_bvh(o: vec3f, v: vec3f) -> bool {
+    var stack = array<u32, 32>();
+    let inv_v = 1.0 / v;
+    let sign = vec3i(i32(v.x < 0), i32(v.y < 0), i32(v.z < 0));
+    var intersects = 0;
+    for(var stack_ptr = 0; stack_ptr >= 0;){
+        let node_idx = stack[stack_ptr];
+        let node = tree[node_idx];
+        if(fast_ray_cube_intersect(o, v, inv_v, sign, node.min.xyz, node.max.xyz)) {
+            if(node.min.w >= 0){ //internal node
+                stack[stack_ptr] = u32(node.min.w);
+                stack_ptr++;
+                stack[stack_ptr] = u32(node.max.w);
+            } else {
+                if(intersect_bvhleaf(o,v,node)){
+                    return true;
+                }
+                stack_ptr--;
+            }
+        } else {
+            stack_ptr--;
+        }
+    }
+    return false;
+}
+
+fn point_cube_intersect(o: vec3f, cube_min: vec3f, cube_max: vec3f) -> bool {
+    return 
+    o.x > cube_min.x && 
+    o.x < cube_max.x && 
+    o.y > cube_min.y && 
+    o.y < cube_max.y && 
+    o.z > cube_min.z && 
+    o.z < cube_max.z;
+}
+
+fn raytrace(o: vec3f, v: vec3f) -> bool {
+    let ct = arrayLength(&triangles);
+    for(var i:u32 = 0; i < ct; i+=9){
+        if(ray_tri_ptr_intersect(o,v,i)){
+            return true;
+        }
+    }
+    return false;
+}
+
+fn get_light(iuv: vec2u) -> vec3f {
+    let dims = settings.dims;
+    let l = light_accumulation[dims.x * iuv.y + iuv.x].data;
+    return l.xyz/l.w;
+}
+
+fn precomputed(fragData: VertexOut) -> vec4f {
+    let dims = settings.dims;
+    let iuv = vec2u(fragData.uv * vec2f(dims));
+    let color = textureLoad(color_tex, iuv, 0).xyz;
+    let pos = textureLoad(position_tex, iuv, 0);
+    let light = get_light(iuv);
+    //let light = (get_light(iuv) + get_light(iuv + vec2(1,0)) + get_light(iuv + vec2(0,1)) + get_light(iuv + vec2(1,1))) / 4.0;
+    if(pos.w == 10000){
+        return vec4(color,1);
+    }
+    return vec4f(light*color.xyz, 1.0);
+}
+
+@fragment
+fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
+{
+    return precomputed(fragData);
+
+    seed_rand(settings.time, fragData.uv.x, fragData.uv.y);
+    let light_dir = normalize(vec3(sin(settings.time), cos(settings.time), 1));
+    //let light_dir = vec3f(0,0,1);
+    let dims = settings.dims;
+    let iuv = vec2u(fragData.uv * vec2f(dims));
+    let ray_light = light_accumulation[dims.x * iuv.y + iuv.x].data;
+    let pos = textureLoad(position_tex, iuv, 0);
+    let norm = textureLoad(normal_tex, iuv, 0);
+    let ambient = 0.5;
+    let directional = max(dot(norm.xyz, light_dir), 0);
+    let light = ambient + directional * 0.5;
+    let depth = pos.w;
+    var color = textureLoad(color_tex, iuv, 0).xyz;
+
+    let gauss = Gaussian(light_dir, vec3(1,1,1), 4.0);
+
+    if(depth == 10000){
+        return vec4(color,1);
+    }
+
+    let ct:u32 = 1;
+    var num_hits = 0;
+    var sun_light = vec3f(0,0,0);
+    for(var i:u32 = 0; i < ct; i++){
+        var sample_dir = normalize(vec3f(
+            rand() * 2.0 - 1.0,
+            rand() * 2.0 - 1.0,
+            rand() * 2.0 - 1.0,
+        ));
+        var norm_dot = dot(sample_dir, norm.xyz);
+        if(norm_dot < 0.0){
+            sample_dir = sample_dir - 2.0 * norm.xyz * norm_dot;
+            norm_dot = -norm_dot;
+        }
+        if(!raytrace_bvh(pos.xyz + sample_dir * 0.01, sample_dir)){
+            let g = GaussEvaluate(gauss, sample_dir);
+            sun_light += vec3f(g * norm_dot);
+        }
+    }
+    
+    
+    /*for(var i = 0; i < ct; i++){
+        let off = vec3f(0,rand()*0.5-0.25,rand()*0.5-0.25);
+        let offset_dir = normalize(light_dir + off);
+        if(!raytrace_bvh(pos.xyz + offset_dir*0.01, offset_dir)){
+            sun_light += GaussEvaluate(gauss, offset_dir);
+            num_hits++;
+        }
+    }*/
+    return vec4f(color.xyz * (0.2 + sun_light / f32(ct)), 1.0);
+    //return vec4f(color.xyz * (ambient + f32(ct-num_hits) * directional / f32(ct)), 1.0);    
+}
+
+
+
+
 
 fn average_kernal(start: vec2u, size: vec2u) -> vec4f {
     var sum = vec4f();
@@ -60,41 +403,4 @@ fn gauss_kernal(start: vec2i, radius: u32, a: f32) -> vec4f {
 
 fn luminance(color: vec4f) -> f32{
     return color.x + color.y + color.z;
-}
-
-override kernalx: u32 = 4;
-override kernaly: u32 = 4;
-
-const WATER_BLUE = vec4f(0.9,0.9,1.3,1);
-
-fn color_reflect(pos: vec2i) -> vec4f {
-    for(var i = 0; i < 60; i++){
-        let c = textureLoad(position_tex, pos + vec2i(0,-i),0);
-        if(c.w != 10000){
-            return textureLoad(color_tex, pos + vec2i(0,-2*i),0) * WATER_BLUE;
-        }
-    }
-    return textureLoad(color_tex, pos, 0) * WATER_BLUE;
-}
-
-@fragment
-fn fragment_main(fragData: VertexOut) -> @location(0) vec4f
-{
-    let dim = textureDimensions(color_tex);
-    let iuv = vec2i(fragData.uv * vec2f(dim));
-    let pos = textureLoad(position_tex, iuv, 0);
-    let norm = textureLoad(normal_tex, iuv, 0);
-    let ambient = 0.5;
-    let directional = max(dot(norm.xyz, vec3(0, 0.3, 0.9)), 0);
-    let light = ambient + directional * 0.5;
-    let depth = pos.w;
-    var color = vec3f();
-    if(depth == 10000){
-        color = color_reflect(iuv).xyz;
-    } else if(depth > 200){
-        color = gauss_kernal(iuv, kernalx, depth/300).xyz;
-    } else {
-        color = textureLoad(color_tex, iuv, 0).xyz;
-    }
-    return vec4(color.xyz * light, 1.0);
 }
